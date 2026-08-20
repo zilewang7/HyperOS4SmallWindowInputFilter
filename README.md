@@ -110,7 +110,7 @@ If your device still misclassifies the gesture as swipe-up-to-home, increase `TE
 │   ├── build.gradle
 │   └── src/main/
 │       ├── AndroidManifest.xml
-│       ├── java/dev/codex/smallwindow/
+│       ├── java/io.github.zilewang7.smallwindow/
 │       │   ├── MainHook.java              # LSPosed entry, hooks InputManagerService
 │       │   └── SmallWindowInputFilter.java # The InputFilter implementation
 │       └── resources/META-INF/xposed/     # LSPosed module metadata
@@ -242,7 +242,7 @@ adb logcat -s SmallWindowInputFilter:I
 │   ├── build.gradle
 │   └── src/main/
 │       ├── AndroidManifest.xml
-│       ├── java/dev/codex/smallwindow/
+│       ├── java/io.github.zilewang7.smallwindow/
 │       │   ├── MainHook.java              # LSPosed 入口，hook InputManagerService
 │       │   └── SmallWindowInputFilter.java # InputFilter 实现
 │       └── resources/META-INF/xposed/     # LSPosed 模块元数据

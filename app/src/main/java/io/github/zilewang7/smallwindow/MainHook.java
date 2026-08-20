@@ -1,4 +1,4 @@
-package dev.codex.smallwindow;
+package io.github.zilewang7.smallwindow;
 
 import android.os.Looper;
 import android.util.Log;

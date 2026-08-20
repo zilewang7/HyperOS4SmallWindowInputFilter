@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace "dev.codex.smallwindow"
+    namespace "io.github.zilewang7.smallwindow"
     compileSdk 37
 
     defaultConfig {
-        applicationId "dev.codex.smallwindow"
+        applicationId "io.github.zilewang7.smallwindow"
         minSdk 36
         targetSdk 36
         versionCode 2

@@ -53,12 +53,14 @@ Requirements:
 - Android SDK Platform 37 (`platforms;android-37`) and Build Tools `37.0.0`
 
 ```bash
-./gradlew :app:assembleDebug --no-daemon
+./gradlew :app:assembleDebug --no-daemon        # debug
+./gradlew :app:assembleRelease --no-daemon      # release (signed when KEYSTORE_* env vars are set)
+./gradlew :app:assembleDiag --no-daemon         # diagnostics (file logging enabled)
 ```
 
-The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+Artifacts follow the `io.github.zilewang7.smallwindow-<buildType>-<versionName>.apk` naming convention, e.g. `io.github.zilewang7.smallwindow-release-1.1.0.apk` and `io.github.zilewang7.smallwindow-debug-1.1.0-diag.apk`.
 
-GitHub Actions builds the same artifact on every push, and pushing a `v*` tag creates a GitHub Release with the APK attached (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
+GitHub Actions builds the debug artifact on every push, and pushing a `v*` tag creates a GitHub Release carrying both the signed release APK and the diagnostics APK (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
 
 ## Install
 
@@ -80,6 +82,8 @@ Watch the filter's decisions:
 ```bash
 adb logcat -s SmallWindowInputFilter:I
 ```
+
+Without a PC: install the diagnostics build (`io.github.zilewang7.smallwindow-debug-*-diag.apk`, attached to every release), reproduce the gesture, and share `/data/system/smallwindow_filter.log` (root-readable; export with a root file manager or `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'`).
 
 Key log lines:
 
@@ -185,12 +189,14 @@ HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖�
 - Android SDK Platform 37（`platforms;android-37`）与 Build Tools `37.0.0`
 
 ```bash
-./gradlew :app:assembleDebug --no-daemon
+./gradlew :app:assembleDebug --no-daemon        # debug
+./gradlew :app:assembleRelease --no-daemon      # release（设置了 KEYSTORE_* 环境变量时使用正式签名）
+./gradlew :app:assembleDiag --no-daemon         # 诊断版（开启文件日志）
 ```
 
-构建产物：`app/build/outputs/apk/debug/app-debug.apk`。
+产物命名遵循 `io.github.zilewang7.smallwindow-<buildType>-<versionName>.apk`，例如 `io.github.zilewang7.smallwindow-release-1.1.0.apk` 和 `io.github.zilewang7.smallwindow-debug-1.1.0-diag.apk`。
 
-GitHub Actions 会在每次 push 时构建同样的产物；推送 `v*` 标签时，会自动创建带 APK 附件的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
+GitHub Actions 会在每次 push 时构建 debug 产物；推送 `v*` 标签时，会自动创建同时附带签名 release APK 与诊断版 APK 的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
 
 ## 安装
 
@@ -212,6 +218,8 @@ Hook 运行在 `system_server` 中，因此模块必须重启后才能生效。
 ```bash
 adb logcat -s SmallWindowInputFilter:I
 ```
+
+不用电脑时：安装诊断版（`io.github.zilewang7.smallwindow-debug-*-diag.apk`，每个 Release 都附带），复现手势后分享 `/data/system/smallwindow_filter.log`（root 可读；可用 root 文件管理器或 `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'` 导出）。
 
 关键日志：
 

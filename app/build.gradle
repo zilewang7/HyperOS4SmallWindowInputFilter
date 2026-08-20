@@ -6,6 +6,10 @@ android {
     namespace "io.github.zilewang7.smallwindow"
     compileSdk 37
 
+    buildFeatures {
+        buildConfig true
+    }
+
     defaultConfig {
         applicationId "io.github.zilewang7.smallwindow"
         minSdk 36
@@ -28,11 +32,24 @@ android {
     }
 
     buildTypes {
+        debug {
+            buildConfigField "boolean", "ENABLE_FILE_LOG", "false"
+        }
         release {
             minifyEnabled false
+            buildConfigField "boolean", "ENABLE_FILE_LOG", "false"
             signingConfig = (System.getenv("KEYSTORE_PATH") != null)
                     ? signingConfigs.release
                     : signingConfigs.debug
+        }
+        // Diagnostics variant: debug build with file logging enabled,
+        // published alongside the release build.
+        diag {
+            debuggable true
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+            buildConfigField "boolean", "ENABLE_FILE_LOG", "true"
+            versionNameSuffix "-diag"
         }
     }
 }
@@ -47,11 +64,18 @@ dependencies {
 
 // Artifact naming convention: <applicationId>-<buildType>-<versionName>.apk
 // e.g. io.github.zilewang7.smallwindow-release-1.1.0.apk
+//      io.github.zilewang7.smallwindow-debug-1.1.0.apk
+//      io.github.zilewang7.smallwindow-debug-1.1.0-diag.apk
 androidComponents {
     onVariants(selector().all()) { variant ->
         variant.outputs.forEach { output ->
-            output.outputFileName.set(
-                    "${android.defaultConfig.applicationId}-${variant.name}-${android.defaultConfig.versionName}.apk")
+            def appId = android.defaultConfig.applicationId
+            def ver = android.defaultConfig.versionName
+            if (variant.name == "diag") {
+                output.outputFileName.set("${appId}-debug-${ver}-diag.apk")
+            } else {
+                output.outputFileName.set("${appId}-${variant.name}-${ver}.apk")
+            }
         }
     }
 }

@@ -9,6 +9,8 @@ import android.view.InputEvent;
 import android.view.InputFilter;
 import android.view.MotionEvent;
 
+import io.github.zilewang7.smallwindow.BuildConfig;
+
 import java.io.File;
 import java.io.FileWriter;
 import java.text.SimpleDateFormat;
@@ -514,7 +516,7 @@ public class SmallWindowInputFilter extends InputFilter {
     }
 
     private void fileLog(String msg) {
-        if (!ENABLE_FILE_LOG) {
+        if (!BuildConfig.ENABLE_FILE_LOG) {
             return;
         }
         try {

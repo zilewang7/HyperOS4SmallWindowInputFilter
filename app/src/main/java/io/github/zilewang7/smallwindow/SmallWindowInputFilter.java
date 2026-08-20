@@ -25,8 +25,9 @@ public class SmallWindowInputFilter extends InputFilter {
 
     /**
      * Diagnostics build flag. When true, every decision is appended to
-     * /sdcard/Download/smallwindow_filter.log so a tester can share the file
-     * without a PC or logcat. Production builds keep this false.
+     * /data/system/smallwindow_filter.log (root-readable, writable by
+     * system_server, does not litter user storage) so a tester can share the
+     * file without a PC or logcat. Production builds keep this false.
      */
     private static final boolean ENABLE_FILE_LOG = false;
 
@@ -532,24 +533,35 @@ public class SmallWindowInputFilter extends InputFilter {
     }
 
     private String resolveLogPath() {
-        String primary = "/data/media/0/Download/smallwindow_filter.log";
+        // system_server owns /data/system and writes there routinely; the file
+        // is root-readable so the tester can export it with a root file
+        // manager or `su -c cp`.
+        String primary = "/data/system/smallwindow_filter.log";
         try {
-            File dir = new File("/data/media/0/Download");
-            if (!dir.exists()) {
-                dir.mkdirs();
-            }
-            FileWriter probe = new FileWriter(primary, true);
+            File f = new File(primary);
+            FileWriter probe = new FileWriter(f, true);
             probe.write("");  // probe write permission
             probe.close();
+            f.setReadable(true, false);
             return primary;
         } catch (Throwable primaryFailure) {
             Log.w(TAG, "cannot write " + primary + ", falling back", primaryFailure);
         }
-        File fallback = new File("/data/local/tmp/smallwindow_filter.log");
+        String fallback = "/data/misc/smallwindow/smallwindow_filter.log";
         try {
-            return fallback.getAbsolutePath();
+            File dir = new File("/data/misc/smallwindow");
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            File f = new File(fallback);
+            FileWriter probe = new FileWriter(f, true);
+            probe.write("");
+            probe.close();
+            f.setReadable(true, false);
+            return fallback;
         } catch (Throwable t) {
-            return "/data/local/tmp/smallwindow_filter.log";
+            Log.e(TAG, "no writable log path", t);
+            return "/data/system/smallwindow_filter.log";
         }
     }
 

@@ -14,9 +14,25 @@ android {
         versionName "1.1.0"
     }
 
+    signingConfigs {
+        // Real release signing when CI provides the keystore via env vars;
+        // local builds without a keystore fall back to the debug key.
+        release {
+            if (System.getenv("KEYSTORE_PATH") != null) {
+                storeFile file(System.getenv("KEYSTORE_PATH"))
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias System.getenv("KEY_ALIAS")
+                keyPassword System.getenv("KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig = (System.getenv("KEYSTORE_PATH") != null)
+                    ? signingConfigs.release
+                    : signingConfigs.debug
         }
     }
 }
@@ -27,4 +43,15 @@ dependencies {
 
 dependencies {
     compileOnly files("stubs/inputfilter-stubs.jar")
+}
+
+// Artifact naming convention: <applicationId>-<buildType>-<versionName>.apk
+// e.g. io.github.zilewang7.smallwindow-release-1.1.0.apk
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.outputs.forEach { output ->
+            output.outputFileName.set(
+                    "${android.defaultConfig.applicationId}-${variant.name}-${android.defaultConfig.versionName}.apk")
+        }
+    }
 }

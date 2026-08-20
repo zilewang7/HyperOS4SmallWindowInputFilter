@@ -34,16 +34,28 @@ jobs:
         with:
           packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
 
-      - name: Build debug APK
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "KEYSTORE_PATH=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon
+          ./gradlew :app:assembleRelease --no-daemon
 
       - name: Read APK version
         id: meta
         run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
           AAPT=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 | tail -1)
-          BADGING=$("$AAPT" dump badging app/build/outputs/apk/debug/app-debug.apk)
+          BADGING=$("$AAPT" dump badging "$APK")
           VERCODE=$(printf '%s\n' "$BADGING" | sed -n "s/^package: .*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
           VERNAME=$(printf '%s\n' "$BADGING" | sed -n "s/^package: .*versionName='\([^']*\)'.*/\1/p" | head -1)
           echo "vercode=$VERCODE" >> "$GITHUB_OUTPUT"
@@ -59,10 +71,10 @@ jobs:
           RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           set -euo pipefail
-          APK=app/build/outputs/apk/debug/app-debug.apk
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
           # Store tag format: VersionCode-VersionName (spaces in name -> _)
           TAG="${VERCODE}-${VERNAME// /_}"
-          ASSET_NAME="HyperOS4SmallWindowInputFilter-v${VERNAME}.apk"
+          ASSET_NAME="io.github.zilewang7.smallwindow-release-${VERNAME}.apk"
           API="https://api.github.com/repos/${STORE_REPO}"
           AUTH="Authorization: Bearer ${TOKEN}"
           ACCEPT="Accept: application/vnd.github+json"

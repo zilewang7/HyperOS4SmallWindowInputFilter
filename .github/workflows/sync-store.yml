@@ -73,13 +73,7 @@ jobs:
             RELEASE_ID=$(printf '%s' "$EXISTING" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
             echo "store release already exists: id=$RELEASE_ID"
           else
-            BODY=$(python3 -c "
-import json, os
-body = os.environ.get('RELEASE_BODY') or 'Automated sync from source repository.'
-payload = {'tag_name': os.environ['TAG'], 'name': os.environ['VERNAME'],
-           'body': body, 'draft': False, 'prerelease': False}
-print(json.dumps(payload))
-")
+            BODY=$(python3 -c "import json,os; print(json.dumps({'tag_name': os.environ['TAG'], 'name': os.environ['VERNAME'], 'body': os.environ.get('RELEASE_BODY') or 'Automated sync from source repository.', 'draft': False, 'prerelease': False}))")
             RESP=$(curl -sS -X POST -H "$AUTH" -H "$ACCEPT" "$API/releases" -d "$BODY")
             echo "$RESP" | head -c 300; echo
             RELEASE_ID=$(printf '%s' "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")

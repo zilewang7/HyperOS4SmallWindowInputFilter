@@ -1,5 +1,6 @@
 package io.github.zilewang7.smallwindow;
 
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -8,14 +9,26 @@ import android.view.InputEvent;
 import android.view.InputFilter;
 import android.view.MotionEvent;
 
+import java.io.File;
+import java.io.FileWriter;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public class SmallWindowInputFilter extends InputFilter {
     private static final String TAG = "SmallWindowInputFilter";
+
+    /**
+     * Diagnostics build flag. When true, every decision is appended to
+     * /sdcard/Download/smallwindow_filter.log so a tester can share the file
+     * without a PC or logcat. Production builds keep this false.
+     */
+    private static final boolean ENABLE_FILE_LOG = false;
 
     /** Duration of the smooth synthetic glide from thumb position to target. */
     private static final long TELEPORT_DURATION_MS = 180L;
@@ -30,6 +43,9 @@ public class SmallWindowInputFilter extends InputFilter {
 
     private final Handler handler;
     private final Map<StreamKey, TeleportState> streams = new HashMap<>();
+
+    private String fileLogPath;
+    private boolean deviceInfoLogged;
 
     public SmallWindowInputFilter(Looper looper) {
         super(looper);
@@ -53,7 +69,9 @@ public class SmallWindowInputFilter extends InputFilter {
             // A new physical gesture is starting. Make sure no synthetic stream is
             // still holding a pointer down in the system's view.
             endAllActiveStreamsForNewGesture();
-            if (isBottomSwipeStart(motionEvent)) {
+            boolean bottom = isBottomSwipeStart(motionEvent);
+            fileLog("REAL " + evt(motionEvent) + " -> " + (bottom ? "CANDIDATE" : "pass"));
+            if (bottom) {
                 TeleportState state = new TeleportState();
                 state.key = key;
                 state.primaryProps = new MotionEvent.PointerProperties();
@@ -88,9 +106,12 @@ public class SmallWindowInputFilter extends InputFilter {
         if (state.pendingUpEvent != null) {
             // The stream was already ended; flush the drop and swallow this event.
             Log.w(TAG, "event after pending drop, flushing pending UP");
+            fileLog("REAL " + evt(motionEvent) + " -> after pending drop, flush");
             flushDrop(state);
             return;
         }
+
+        fileLog("REAL " + evt(motionEvent));
 
         switch (action) {
             case MotionEvent.ACTION_POINTER_DOWN: {
@@ -103,6 +124,7 @@ public class SmallWindowInputFilter extends InputFilter {
                 // changes on screen yet.
                 state.secondDown = true;
                 state.teleported = false;
+                fileLog("  swallow second finger DOWN target=" + pt(motionEvent, actionIndex));
                 Log.i(TAG, "second finger down targetX=" + motionEvent.getX(actionIndex)
                         + " targetY=" + motionEvent.getY(actionIndex));
                 // Swallow: the system keeps seeing only the original thumb pointer.
@@ -114,6 +136,7 @@ public class SmallWindowInputFilter extends InputFilter {
                     // only update the target; the glide homes toward it.
                     state.targetX = motionEvent.getX(0);
                     state.targetY = motionEvent.getY(0);
+                    fileLog("  glide running, target updated " + pt(motionEvent, 0));
                     return;
                 }
                 if (state.teleported) {
@@ -127,6 +150,7 @@ public class SmallWindowInputFilter extends InputFilter {
                     state.lastMoveTime = motionEvent.getEventTime();
                     state.lastX = motionEvent.getX(0);
                     state.lastY = motionEvent.getY(0);
+                    fileLog("  fwd index move as thumb " + pt(motionEvent, 0));
                 } else if (state.secondDown) {
                     // Keep the window following the thumb while the second finger
                     // only marks a target. The system must only see one pointer.
@@ -138,6 +162,7 @@ public class SmallWindowInputFilter extends InputFilter {
                     state.lastMoveTime = motionEvent.getEventTime();
                     state.lastX = motionEvent.getX(0);
                     state.lastY = motionEvent.getY(0);
+                    fileLog("  fwd thumb move (second finger held) " + pt(motionEvent, 0));
                 } else {
                     sendInputEvent(event, policyFlags);
                 }
@@ -150,6 +175,7 @@ public class SmallWindowInputFilter extends InputFilter {
                     // the original drag unchanged.
                     if (state.secondDown) {
                         state.secondDown = false;
+                        fileLog("  swallow second finger UP (before thumb), drag unchanged");
                         Log.i(TAG, "second finger up before thumb, drag unchanged");
                     }
                     // Always swallow: pointer 1 was never exposed to the system.
@@ -157,6 +183,7 @@ public class SmallWindowInputFilter extends InputFilter {
                 }
                 // Primary (thumb) lifted while the second finger is still down.
                 if (state.secondDown && !state.teleported) {
+                    fileLog("  thumb up -> start synthetic glide to " + pt(motionEvent, 1));
                     Log.i(TAG, "thumb up -> start synthetic glide to second finger");
                     state.teleported = true;
                     state.secondDown = false;
@@ -175,6 +202,7 @@ public class SmallWindowInputFilter extends InputFilter {
                 } else {
                     // Fallback: end the gesture with a clean single-pointer UP at
                     // the thumb position, never forward an unknown 2-pointer event.
+                    fileLog("  unexpected primary UP -> clean UP");
                     Log.w(TAG, "unexpected primary pointer up, synthesizing clean UP");
                     MotionEvent up = remapWithPrimaryProps(motionEvent,
                             MotionEvent.ACTION_UP, state, 0, 0f, 0f,
@@ -192,11 +220,13 @@ public class SmallWindowInputFilter extends InputFilter {
                     if (!state.interpDone) {
                         // Let the synthetic glide finish, then it will schedule the
                         // final drop automatically.
+                        fileLog("  index up during glide, finish glide then drop");
                         Log.i(TAG, "index up during glide, finish glide then drop");
                         return;
                     }
                     long hold = now - state.lastMoveTime;
                     if (hold >= MIN_DROP_HOLD_MS) {
+                        fileLog("  index up, drop now (hold=" + hold + "ms)");
                         Log.i(TAG, "index up, dropping into small window (hold="
                                 + hold + "ms)");
                         MotionEvent up = remapWithPrimaryProps(motionEvent,
@@ -205,15 +235,18 @@ public class SmallWindowInputFilter extends InputFilter {
                         up.recycle();
                         streams.remove(key);
                     } else {
+                        fileLog("  index up too fast, delay drop (hold=" + hold + "ms)");
                         scheduleDelayedDrop(state, motionEvent, policyFlags, now);
                     }
                 } else {
+                    fileLog("  plain UP, forward and end");
                     sendInputEvent(event, policyFlags);
                     streams.remove(key);
                 }
                 return;
             }
             case MotionEvent.ACTION_CANCEL:
+                fileLog("  CANCEL, forward and end");
                 cancelStream(state);
                 sendInputEvent(event, policyFlags);
                 return;
@@ -230,6 +263,7 @@ public class SmallWindowInputFilter extends InputFilter {
             delay = 0;
             desiredEventTime = now;
         }
+        fileLog("  delaying UP by " + delay + "ms");
         Log.i(TAG, "drop too fast, delaying UP by " + delay + "ms");
         MotionEvent up = remapWithPrimaryProps(source, MotionEvent.ACTION_UP,
                 state, 0, 0f, 0f, desiredEventTime);
@@ -246,6 +280,9 @@ public class SmallWindowInputFilter extends InputFilter {
             float y = event.getY(0);
             float threshold = Math.max(dm.heightPixels * 0.82f,
                     dm.heightPixels - 350f);
+            fileLog("  metrics " + dm.widthPixels + "x" + dm.heightPixels
+                    + " dpi=" + dm.densityDpi + " threshold=" + threshold
+                    + " y0=" + y + " count=" + event.getPointerCount());
             return event.getPointerCount() == 1 && y >= threshold;
         } catch (Throwable throwable) {
             Log.e(TAG, "isBottomSwipeStart failed", throwable);
@@ -333,26 +370,22 @@ public class SmallWindowInputFilter extends InputFilter {
                 toEnd.add(state);
             } else {
                 handler.removeCallbacks(state.interpRunnable);
+                fileLog("  ending active synthetic stream for new gesture");
                 Log.i(TAG, "ending active synthetic stream for new gesture");
                 MotionEvent up = synthesize(state, MotionEvent.ACTION_UP, now,
                         state.teleported ? state.targetX : state.lastX,
                         state.teleported ? state.targetY : state.lastY);
-                sendInputEvent(up, policyFlagsFromState(state));
+                sendInputEvent(up, 0);
                 up.recycle();
             }
         }
         for (TeleportState state : toEnd) {
+            fileLog("  flushing pending drop for new gesture");
             Log.i(TAG, "flushing pending drop for new gesture");
             sendInputEvent(state.pendingUpEvent, state.pendingPolicyFlags);
             state.pendingUpEvent.recycle();
             state.pendingUpEvent = null;
         }
-    }
-
-    private int policyFlagsFromState(TeleportState state) {
-        // Pending drops carry their own flags; for freshly synthesized events the
-        // caller's flags are not available, so use the default trusted flag set.
-        return 0;
     }
 
     private void flushDrop(TeleportState state) {
@@ -361,6 +394,7 @@ public class SmallWindowInputFilter extends InputFilter {
         }
         handler.removeCallbacks(state.pendingRunnable);
         streams.remove(state.key);
+        fileLog("  flushing pending drop");
         Log.i(TAG, "flushing pending drop");
         sendInputEvent(state.pendingUpEvent, state.pendingPolicyFlags);
         state.pendingUpEvent.recycle();
@@ -410,6 +444,7 @@ public class SmallWindowInputFilter extends InputFilter {
             state.lastMoveTime = now;
             state.lastX = x;
             state.lastY = y;
+            fileLog("  synth MOVE t=" + t + " -> " + x + "," + y);
 
             if (t < 1f) {
                 handler.postDelayed(this, TICK_MS);
@@ -418,6 +453,7 @@ public class SmallWindowInputFilter extends InputFilter {
 
             state.interpDone = true;
             state.interpRunnable = null;
+            fileLog("  glide finished at " + state.targetX + "," + state.targetY);
             Log.i(TAG, "glide finished, targetX=" + state.targetX
                     + " targetY=" + state.targetY);
             if (state.indexUp) {
@@ -432,6 +468,7 @@ public class SmallWindowInputFilter extends InputFilter {
                     state.pendingUpEvent = up;
                     state.pendingPolicyFlags = 0;
                     state.pendingRunnable = new DropRunnable(state);
+                    fileLog("  index already up, schedule drop in " + delay + "ms");
                     Log.i(TAG, "index already up, scheduling drop in " + delay + "ms");
                     handler.postDelayed(state.pendingRunnable, delay);
                 } else {
@@ -440,6 +477,7 @@ public class SmallWindowInputFilter extends InputFilter {
                     sendInputEvent(up, 0);
                     up.recycle();
                     streams.remove(state.key);
+                    fileLog("  drop UP now");
                 }
             }
         }
@@ -458,10 +496,92 @@ public class SmallWindowInputFilter extends InputFilter {
                 return;
             }
             streams.remove(state.key);
+            fileLog("  delayed drop UP delivered");
             Log.i(TAG, "delayed drop UP delivered");
             sendInputEvent(state.pendingUpEvent, state.pendingPolicyFlags);
             state.pendingUpEvent.recycle();
             state.pendingUpEvent = null;
+        }
+    }
+
+    // ---- diagnostics file logging -------------------------------------------
+
+    public void fileLogDeviceInfo() {
+        fileLog("device " + Build.MANUFACTURER + " " + Build.MODEL
+                + " sdk=" + Build.VERSION.SDK_INT
+                + " fingerprint=" + Build.FINGERPRINT);
+    }
+
+    private void fileLog(String msg) {
+        if (!ENABLE_FILE_LOG) {
+            return;
+        }
+        try {
+            if (fileLogPath == null) {
+                fileLogPath = resolveLogPath();
+                Log.i(TAG, "file log at " + fileLogPath);
+            }
+            FileWriter fw = new FileWriter(new File(fileLogPath), true);
+            String ts = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US)
+                    .format(new Date());
+            fw.write(ts + " " + msg + "\n");
+            fw.close();
+        } catch (Throwable throwable) {
+            Log.e(TAG, "fileLog failed", throwable);
+        }
+    }
+
+    private String resolveLogPath() {
+        String primary = "/data/media/0/Download/smallwindow_filter.log";
+        try {
+            File dir = new File("/data/media/0/Download");
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            FileWriter probe = new FileWriter(primary, true);
+            probe.write("");  // probe write permission
+            probe.close();
+            return primary;
+        } catch (Throwable primaryFailure) {
+            Log.w(TAG, "cannot write " + primary + ", falling back", primaryFailure);
+        }
+        File fallback = new File("/data/local/tmp/smallwindow_filter.log");
+        try {
+            return fallback.getAbsolutePath();
+        } catch (Throwable t) {
+            return "/data/local/tmp/smallwindow_filter.log";
+        }
+    }
+
+    private static String pt(MotionEvent e, int index) {
+        return String.format(Locale.US, "%.0f,%.0f", e.getX(index), e.getY(index));
+    }
+
+    private static String evt(MotionEvent e) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(actionName(e.getActionMasked()));
+        sb.append(" idx=").append(e.getActionIndex());
+        sb.append(" count=").append(e.getPointerCount());
+        for (int i = 0; i < e.getPointerCount(); i++) {
+            sb.append(String.format(Locale.US, " [p%d]%.0f,%.0f",
+                    e.getPointerId(i), e.getX(i), e.getY(i)));
+        }
+        sb.append(" dev=").append(e.getDeviceId());
+        sb.append(" src=0x").append(Integer.toHexString(e.getSource()));
+        sb.append(" down=").append(e.getDownTime());
+        sb.append(" t=").append(e.getEventTime());
+        return sb.toString();
+    }
+
+    private static String actionName(int action) {
+        switch (action) {
+            case MotionEvent.ACTION_DOWN: return "DOWN";
+            case MotionEvent.ACTION_MOVE: return "MOVE";
+            case MotionEvent.ACTION_UP: return "UP";
+            case MotionEvent.ACTION_CANCEL: return "CANCEL";
+            case MotionEvent.ACTION_POINTER_DOWN: return "PTR_DOWN";
+            case MotionEvent.ACTION_POINTER_UP: return "PTR_UP";
+            default: return "ACT_" + action;
         }
     }
 

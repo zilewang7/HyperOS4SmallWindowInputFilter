@@ -79,6 +79,7 @@ public class MainHook extends XposedModule {
                 inputFilter = new SmallWindowInputFilter(Looper.getMainLooper());
             }
             setter.invoke(ims, inputFilter);
+            inputFilter.fileLogDeviceInfo();
             Log.i(TAG, "installed SmallWindowInputFilter");
         } catch (Throwable throwable) {
             Log.e(TAG, "installInputFilter failed", throwable);

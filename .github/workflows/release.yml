@@ -47,9 +47,9 @@ jobs:
         with:
           generate_release_notes: true
           body: |
-            > 遇到问题可安装本 Release 中的 `smallwindow-*_debug_diag.apk` 诊断版复现。手势决策日志位于 `/data/system/smallwindow_filter.log`（root 可读），反馈问题时请附上该日志。
+            > 遇到问题可安装本 Release 中的 `io.github.zilewang7.smallwindow-*_debug_diag.apk` 诊断版复现。手势决策日志位于 `/data/system/smallwindow_filter.log`（root 可读），反馈问题时请附上该日志。
 
-            > If you hit an issue, install the `smallwindow-*_debug_diag.apk` diagnostics build from this release. Gesture decisions are logged to `/data/system/smallwindow_filter.log` (root-readable); attach it when reporting.
+            > If you hit an issue, install the `io.github.zilewang7.smallwindow-*_debug_diag.apk` diagnostics build from this release. Gesture decisions are logged to `/data/system/smallwindow_filter.log` (root-readable); attach it when reporting.
           files: |
             app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/diag/*.apk

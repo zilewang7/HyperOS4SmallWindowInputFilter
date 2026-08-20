@@ -58,9 +58,9 @@ Requirements:
 ./gradlew :app:assembleDiag --no-daemon         # diagnostics (file logging enabled)
 ```
 
-Artifacts follow the `smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `smallwindow-1.1.0.apk` (release), `smallwindow-1.1.0_debug.apk` (debug) and `smallwindow-1.1.0_debug_diag.apk` (diagnostics). Release assets sort first because GitHub lists assets alphabetically.
+Artifacts follow the `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `io.github.zilewang7.smallwindow-1.1.0.apk` (release), `io.github.zilewang7.smallwindow-1.1.0_debug.apk` (debug) and `io.github.zilewang7.smallwindow-1.1.0_debug_diag.apk` (diagnostics). The release build has no type suffix, so it sorts first in GitHub's alphabetical asset listing.
 
-GitHub Actions builds the debug artifact on every push, and pushing a `v*` tag creates a GitHub Release carrying the signed release APK (`smallwindow-*.apk`) and the diagnostics APK (`smallwindow-*_debug_diag.apk`) (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
+GitHub Actions builds the debug artifact on every push, and pushing a `v*` tag creates a GitHub Release carrying the signed release APK (`io.github.zilewang7.smallwindow-*.apk`) and the diagnostics APK (`io.github.zilewang7.smallwindow-*_debug_diag.apk`) (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
 
 ## Install
 
@@ -83,7 +83,7 @@ Watch the filter's decisions:
 adb logcat -s SmallWindowInputFilter:I
 ```
 
-Without a PC: install the diagnostics build (`smallwindow-*_debug_diag.apk`, attached to every release), reproduce the gesture, and share `/data/system/smallwindow_filter.log` (root-readable; export with a root file manager or `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'`).
+Without a PC: install the diagnostics build (`io.github.zilewang7.smallwindow-*_debug_diag.apk`, attached to every release), reproduce the gesture, and share `/data/system/smallwindow_filter.log` (root-readable; export with a root file manager or `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'`).
 
 Key log lines:
 
@@ -194,9 +194,9 @@ HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖�
 ./gradlew :app:assembleDiag --no-daemon         # 诊断版（开启文件日志）
 ```
 
-产物命名遵循 `smallwindow-<versionName>[_debug[_diag]].apk`，例如 `smallwindow-1.1.0.apk`（正式版）、`smallwindow-1.1.0_debug.apk`（debug）和 `smallwindow-1.1.0_debug_diag.apk`（诊断版）。GitHub 按字母序排列附件，正式版会排在最前。
+产物命名遵循 `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk`，例如 `io.github.zilewang7.smallwindow-1.1.0.apk`（正式版）、`io.github.zilewang7.smallwindow-1.1.0_debug.apk`（debug）和 `io.github.zilewang7.smallwindow-1.1.0_debug_diag.apk`（诊断版）。正式版不带类型后缀，在 GitHub 的字母序附件列表中会排在最前。
 
-GitHub Actions 会在每次 push 时构建 debug 产物；推送 `v*` 标签时，会自动创建同时附带签名正式版 APK（`smallwindow-*.apk`）与诊断版 APK（`smallwindow-*_debug_diag.apk`）的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
+GitHub Actions 会在每次 push 时构建 debug 产物；推送 `v*` 标签时，会自动创建同时附带签名正式版 APK（`io.github.zilewang7.smallwindow-*.apk`）与诊断版 APK（`io.github.zilewang7.smallwindow-*_debug_diag.apk`）的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
 
 ## 安装
 
@@ -219,7 +219,7 @@ Hook 运行在 `system_server` 中，因此模块必须重启后才能生效。
 adb logcat -s SmallWindowInputFilter:I
 ```
 
-不用电脑时：安装诊断版（`smallwindow-*_debug_diag.apk`，每个 Release 都附带），复现手势后分享 `/data/system/smallwindow_filter.log`（root 可读；可用 root 文件管理器或 `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'` 导出）。
+不用电脑时：安装诊断版（`io.github.zilewang7.smallwindow-*_debug_diag.apk`，每个 Release 都附带），复现手势后分享 `/data/system/smallwindow_filter.log`（root 可读；可用 root 文件管理器或 `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'` 导出）。
 
 关键日志：
 

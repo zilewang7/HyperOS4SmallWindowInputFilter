@@ -74,7 +74,7 @@ jobs:
           APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
           # Store tag format: VersionCode-VersionName (spaces in name -> _)
           TAG="${VERCODE}-${VERNAME// /_}"
-          ASSET_NAME="smallwindow-${VERNAME}.apk"
+          ASSET_NAME="io.github.zilewang7.smallwindow-${VERNAME}.apk"
           API="https://api.github.com/repos/${STORE_REPO}"
           AUTH="Authorization: Bearer ${TOKEN}"
           ACCEPT="Accept: application/vnd.github+json"

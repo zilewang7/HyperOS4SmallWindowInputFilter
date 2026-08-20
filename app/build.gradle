@@ -62,20 +62,24 @@ dependencies {
     compileOnly files("stubs/inputfilter-stubs.jar")
 }
 
-// Artifact naming convention: <applicationId>-<buildType>-<versionName>.apk
-// e.g. io.github.zilewang7.smallwindow-release-1.1.0.apk
-//      io.github.zilewang7.smallwindow-debug-1.1.0.apk
-//      io.github.zilewang7.smallwindow-debug-1.1.0-diag.apk
+// Artifact naming convention (short, mobile-friendly, release sorts first
+// because GitHub lists release assets alphabetically and '.' < '_'):
+//   smallwindow-1.1.0.apk            (release)
+//   smallwindow-1.1.0_debug.apk      (debug)
+//   smallwindow-1.1.0_debug_diag.apk (diagnostics)
 androidComponents {
     onVariants(selector().all()) { variant ->
         variant.outputs.forEach { output ->
-            def appId = android.defaultConfig.applicationId
             def ver = android.defaultConfig.versionName
+            def name
             if (variant.name == "diag") {
-                output.outputFileName.set("${appId}-debug-${ver}-diag.apk")
+                name = "smallwindow-${ver}_debug_diag.apk"
+            } else if (variant.name == "debug") {
+                name = "smallwindow-${ver}_debug.apk"
             } else {
-                output.outputFileName.set("${appId}-${variant.name}-${ver}.apk")
+                name = "smallwindow-${ver}.apk"
             }
+            output.outputFileName.set(name)
         }
     }
 }

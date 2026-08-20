@@ -58,7 +58,7 @@ Requirements:
 
 The APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
-GitHub Actions builds the same artifact on every push, and pushing a `v*` tag creates a GitHub Release with the APK attached (see `.github/workflows/build.yml` and `.github/workflows/release.yml`).
+GitHub Actions builds the same artifact on every push, and pushing a `v*` tag creates a GitHub Release with the APK attached (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
 
 ## Install
 
@@ -190,7 +190,7 @@ HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖�
 
 构建产物：`app/build/outputs/apk/debug/app-debug.apk`。
 
-GitHub Actions 会在每次 push 时构建同样的产物；推送 `v*` 标签时，会自动创建带 APK 附件的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。
+GitHub Actions 会在每次 push 时构建同样的产物；推送 `v*` 标签时，会自动创建带 APK 附件的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
 
 ## 安装
 

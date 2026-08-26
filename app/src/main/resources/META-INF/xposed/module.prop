@@ -1,9 +1,9 @@
 id=io.github.zilewang7.smallwindow
 name=HyperOS4 SmallWindow Input Filter
-version=1.1.0
-versionCode=3
+version=1.2.0
+versionCode=4
 author=zilewang7
-description=Restore the old HyperOS two-finger gesture that drops a foreground app into small window from the recents drag.
+description=Restore the old HyperOS two-finger small-window gesture through the MiuiHome HYOS runtime.
 minApiVersion=102
 targetApiVersion=102
 staticScope=true

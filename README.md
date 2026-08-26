@@ -15,34 +15,35 @@ On older HyperOS/MIUI versions, while an app is foreground you could:
 3. Release your thumb — the window is dragged/teleported to the index-finger position.
 4. Release your index finger — the window drops into small-window mode there.
 
-On HyperOS 4 this was broken: the second finger cancels the recents drag and the window snaps back to the foreground app. This module restores the old behavior by filtering input events inside `system_server`.
+On HyperOS 4 this was broken: the second finger cancels the recents drag and the window snaps back to the foreground app. This module restores the launcher-native two-finger route.
 
 ## How it works
 
-- The HyperOS 4 launcher (`com.miui.home`) is a native binary (`hyos_spawner` / `libapp_launcher.so`) with no Java code, so it cannot be hooked directly with LSPosed.
-- The module hooks `com.android.server.input.InputManagerService` in `system_server` and installs an `android.view.InputFilter`.
-- The filter watches touch streams that start as a single-finger `ACTION_DOWN` in the bottom gesture zone (height × 0.82, or `height - 350px`, whichever is larger).
-- For such streams:
-  - The second finger's `ACTION_POINTER_DOWN` is swallowed and only its coordinates are recorded, so the launcher never sees a multi-touch stream and never cancels the drag.
-  - While both fingers are down, only the thumb's movements are forwarded (as a single pointer).
-  - When the thumb lifts, the filter synthesizes a smooth ~180 ms glide of the same pointer from the thumb position to the index-finger position.
-  - When the index finger lifts, the filter sends the final `ACTION_UP` at the target position, so the launcher drops the window into small-window mode.
-- The glide and the one-frame (16 ms) hold before the drop keep the perceived velocity low, preventing the gesture from being classified as a swipe-up-to-home.
+- HyperOS 4 MiuiHome (`com.miui.home`) is a native HYOS application spawned by `/system_ext/bin/hyos_spawner`; it does not run on ART.
+- Zygisk Next 1.5.0+ exposes the HYOS application-specialization lifecycle. LSPosed IT 2.1.1+ uses it to load this APK's `META-INF/xposed/native_init.list` entry into the scoped MiuiHome process.
+- The arm64 payload validates the exact process, launcher image, entry point, and cancellation-path fingerprints before installing anything.
+- MiuiHome 5361 locally interprets the second finger as a move only at the decision that would otherwise cancel the Home drag. The real multi-pointer event remains unchanged for the downstream launcher/Flutter recents path, allowing the launcher to perform its original handoff and drop behavior.
+- HYOS may remap APK-backed runtime pages. The module protects its PLT hook pages from runtime cleanup and can reapply the caller-local hook without pinning a `hyos_spawner` Build ID.
+- Unsupported or ambiguous launcher layouts fail closed and preserve Xiaomi's original behavior.
+
+This runtime architecture follows the current native integration in [MiuiBackGestureHook](https://github.com/wxxsfxyzm/MiuiBackGestureHook).
 
 ## Compatibility
 
-Tested on:
+Validated target profile:
 
 - Xiaomi 17 Pro Max (`2509FPN0BC`)
 - HyperOS `OS4.0.0.20.XPBCNXM`, Android 17 (SDK 37)
-- LSPosed IT (API 102) with Zygisk Next on APatch
+- MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
+- arm64-v8a
 
-The module only injects into `system_server` and `com.android.systemui`. It may work on other HyperOS 4 devices with the same native-launcher behavior, but it is not guaranteed.
+Other official HyperOS 4 launcher builds require a separately verified native profile. Modified official ROMs and ported/custom ROMs are not supported; report their runtime or gesture differences to the ROM maintainer.
 
 ## Requirements
 
-- Android 16+ (the APK targets SDK 36+)
-- LSPosed with libxposed API 102 or newer
+- Official HyperOS 4 / Android 17 firmware
+- Zygisk Next 1.5.0 or newer
+- LSPosed IT 2.1.1 or newer with HYOS-spawner support (libxposed API 102)
 - Root (Magisk / APatch / KernelSU) with LSPosed working
 
 ## Build
@@ -50,15 +51,16 @@ The module only injects into `system_server` and `com.android.systemui`. It may 
 Requirements:
 
 - JDK 17
-- Android SDK Platform 37 (`platforms;android-37`) and Build Tools `37.0.0`
+- Android SDK Platform 37 (`platforms;android-37.0`) and Build Tools `37.0.0`
+- Android NDK `30.0.14904198` and CMake `3.22.1`
 
 ```bash
 ./gradlew :app:assembleDebug --no-daemon        # debug
 ./gradlew :app:assembleRelease --no-daemon      # release (signed when KEYSTORE_* env vars are set)
-./gradlew :app:assembleDiag --no-daemon         # diagnostics (file logging enabled)
+./gradlew :app:assembleDiag --no-daemon         # diagnostics (native file logging enabled)
 ```
 
-Artifacts follow the `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `io.github.zilewang7.smallwindow-1.1.0.apk` (release), `io.github.zilewang7.smallwindow-1.1.0_debug.apk` (debug) and `io.github.zilewang7.smallwindow-1.1.0_debug_diag.apk` (diagnostics). The release build has no type suffix, so it sorts first in GitHub's alphabetical asset listing.
+Artifacts follow the `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `io.github.zilewang7.smallwindow-1.2.0.apk` (release), `io.github.zilewang7.smallwindow-1.2.0_debug.apk` (debug) and `io.github.zilewang7.smallwindow-1.2.0_debug_diag.apk` (diagnostics). The release build has no type suffix, so it sorts first in GitHub's alphabetical asset listing.
 
 GitHub Actions builds the debug artifact on every push, and pushing a `v*` tag creates a GitHub Release carrying the signed release APK (`io.github.zilewang7.smallwindow-*.apk`) and the diagnostics APK (`io.github.zilewang7.smallwindow-*_debug_diag.apk`) (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
 
@@ -70,67 +72,61 @@ GitHub Actions builds the debug artifact on every push, and pushing a `v*` tag c
    adb push app-debug.apk /data/local/tmp/smallwindow.apk
    adb shell 'su -c "pm install -r /data/local/tmp/smallwindow.apk"'
    ```
-3. Open the LSPosed manager, enable the module and make sure the scope includes `system` (and `com.android.systemui`).
+3. Open the LSPosed manager, enable the module and make sure the scope includes `com.miui.home`.
 4. Reboot the phone.
 
-The hook lives in `system_server`, so the module only takes effect after a reboot.
+The native entry is loaded when a fresh MiuiHome HYOS child starts. A full reboot is the normal activation path.
 
 ## Debugging
 
-Watch the filter's decisions:
+Watch the native runtime log:
 
 ```bash
-adb logcat -s SmallWindowInputFilter:I
+adb logcat -s SmallWindowNative:I
 ```
 
-Without a PC: install the diagnostics build (`io.github.zilewang7.smallwindow-*_debug_diag.apk`, attached to every release), reproduce the gesture, and share `/data/system/smallwindow_filter.log` (root-readable; export with a root file manager or `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'`).
+Without a PC: install the diagnostics build (`io.github.zilewang7.smallwindow-*_debug_diag.apk`, attached to every release), reproduce the gesture, and share `/data/user_de/0/com.miui.home/cache/smallwindow_native.log` (root-readable; the credential-encrypted fallback is `/data/user/0/com.miui.home/cache/smallwindow_native.log`).
 
 Key log lines:
 
-- `candidate stream down ...` — a bottom-edge single-finger stream was detected.
-- `second finger down targetX=... targetY=...` — the second finger was swallowed and recorded.
-- `thumb up -> start synthetic glide to second finger` — the thumb was released first.
-- `glide finished, targetX=... targetY=...` — the synthetic glide reached the target.
-- `index up, dropping into small window ...` — the final drop `ACTION_UP` was sent.
+- `native entry initialized in MiuiHome HYOS child` — LSPosed loaded the APK native entry.
+- `installed HYOS hook-page guard` — runtime page cleanup protection is active.
+- `MiuiHome 5361 HYOS runtime hook ready` — the exact launcher profile matched and the hook is active.
+- `kept second pointer on Home recognizer path` — the cancellation decision was bypassed for the gesture.
+- `unsupported MiuiHome native profile; no hook` — the launcher build did not match and was left unchanged.
 
-## Tuning
+## Native profiles
 
-All timing constants are at the top of `SmallWindowInputFilter.java`:
-
-| Constant | Default | Meaning |
-| --- | --- | --- |
-| `TELEPORT_DURATION_MS` | `180L` | How long the synthetic glide from thumb to index finger takes. |
-| `MIN_DROP_HOLD_MS` | `16L` | Minimum one-frame hold at the target before the drop `UP`. |
-| `TICK_MS` | `16L` | Frame interval of the synthetic glide. |
-
-If your device still misclassifies the gesture as swipe-up-to-home, increase `TELEPORT_DURATION_MS` or `MIN_DROP_HOLD_MS`.
+Native offsets and immutable fingerprints live in `smallwindow_native.cpp`. A new official MiuiHome build must be analyzed and validated separately. Do not copy offsets from a nearby version or relax profile matching for modified/ported ROMs.
 
 ## Project layout
 
 ```
 .
-├── .github/workflows/build.yml   # CI build
+├── .github/workflows/             # Build, release and store sync
 ├── app/
-│   ├── build.gradle
+│   ├── build.gradle               # Android/NDK variants and artifact names
 │   └── src/main/
-│       ├── AndroidManifest.xml
+│       ├── cpp/
+│       │   ├── CMakeLists.txt
+│       │   └── smallwindow_native.cpp # MiuiHome HYOS native entry
 │       ├── java/io.github.zilewang7.smallwindow/
-│       │   ├── MainHook.java              # LSPosed entry, hooks InputManagerService
-│       │   └── SmallWindowInputFilter.java # The InputFilter implementation
-│       └── resources/META-INF/xposed/     # LSPosed module metadata
-│   ├── stubs/
-│   │   ├── inputfilter-stubs.jar          # Compile-only stub for android.view.InputFilter
-│   │   └── src/android/view/InputFilter.java # Source of the stub
+│       │   └── MainHook.java      # libxposed Java metadata entry
+│       └── resources/META-INF/xposed/
+│           ├── native_init.list
+│           ├── module.prop
+│           └── scope.list         # com.miui.home
 ├── build.gradle
 ├── settings.gradle
-└── gradle/wrapper/                        # Gradle wrapper
+└── gradle/wrapper/
 ```
 
-`android.view.InputFilter` is not part of the public Android SDK, so a minimal compile-only stub is used. The stub is never packaged into the APK.
+The native payload exports only `native_init` and is packaged only for `arm64-v8a` with 16 KB ELF segment alignment.
 
 ## License
 
-[MIT](LICENSE)
+Project code is licensed under [MIT](LICENSE). Adapted native integration code
+and notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ---
 
@@ -151,34 +147,35 @@ If your device still misclassifies the gesture as swipe-up-to-home, increase `TE
 3. 松开拇指——窗口被“拖拽”到食指位置；
 4. 松开食指——窗口在该位置挂成小窗。
 
-HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖拽，窗口弹回前台应用。本模块通过在 `system_server` 中过滤输入事件来恢复旧行为。
+HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖拽，窗口弹回前台应用。本模块恢复桌面原生的双指处理路径。
 
 ## 原理
 
-- HyperOS 4 的桌面（`com.miui.home`）是纯原生程序（`hyos_spawner` / `libapp_launcher.so`），没有 Java 代码，因此无法用 LSPosed 直接 hook。
-- 模块 hook `system_server` 中的 `com.android.server.input.InputManagerService`，并安装一个 `android.view.InputFilter`。
-- 过滤器会识别从屏幕底部手势区域开始的单指 `ACTION_DOWN` 触摸流（判定区域：`高度 × 0.82` 与 `高度 - 350px` 两者中的较大值以上）。
-- 对这类触摸流：
-  - 吞掉第二根手指的 `ACTION_POINTER_DOWN`，只记录其坐标，桌面永远看不到多指流，也就不会取消拖拽；
-  - 双指按住期间只转发拇指的单指移动；
-  - 拇指抬起时，过滤器合成一段约 180 ms 的平滑滑动，让系统看到的“同一根手指”从拇指位置滑到食指位置；
-  - 食指抬起时注入最终 `ACTION_UP`，桌面将窗口挂成小窗。
-- 平滑滑动和落地前的 16 ms 一帧停留可降低系统感知到的速度，避免被识别成“上滑回桌面”。
+- HyperOS 4 桌面（`com.miui.home`）是由 `/system_ext/bin/hyos_spawner` 孵化的原生 HYOS 应用，不运行在 ART 上。
+- Zygisk Next 1.5.0+ 提供 HYOS 应用 specialize 生命周期；LSPosed IT 2.1.1+ 利用该能力，按 `com.miui.home` 作用域将本 APK 的 `native_init.list` 入口加载到桌面进程。
+- arm64 payload 在执行任何修改前会校验进程身份、桌面镜像、入口地址和取消路径指纹。
+- MiuiHome 5361 在一个局部判定中把第二指解释为 `MOVE`，不再触发取消；真实多指事件不变，仍交给后续 Launcher / Flutter 多任务路径完成原有的换指、移动和挂小窗行为。
+- HYOS 可能重新映射 APK 内的运行时代码页。模块会保护 PLT hook 页，并在不固定 `hyos_spawner` Build ID 的前提下适配运行时重映射。
+- 桌面布局不受支持或匹配不唯一时，模块会失败关闭，完全保留小米原行为。
+
+Native runtime 架构参考 [MiuiBackGestureHook](https://github.com/wxxsfxyzm/MiuiBackGestureHook) 的最新实现。
 
 ## 兼容性
 
-已在以下环境测试：
+已验证目标 profile：
 
 - 小米 17 Pro Max（`2509FPN0BC`）
 - HyperOS `OS4.0.0.20.XPBCNXM`，Android 17（SDK 37）
-- LSPosed IT（API 102）+ Zygisk Next + APatch
+- MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
+- arm64-v8a
 
-模块只注入 `system_server` 与 `com.android.systemui`。其他具有相同原生桌面行为的 HyperOS 4 设备可能也能用，但不保证。
+其他官方 HyperOS 4 桌面版本需要单独分析并验证 native profile。**不支持官改包、移植包及其他第三方修改系统；这类系统的问题请向对应系统维护者反馈。**
 
 ## 要求
 
-- Android 16+（APK targetSdk 36+）
-- LSPosed，libxposed API 102 或更高
+- 官方 HyperOS 4 / Android 17 固件
+- Zygisk Next 1.5.0 或更高
+- LSPosed IT 2.1.1 或更高，且支持 HYOS spawner（libxposed API 102）
 - Root（Magisk / APatch / KernelSU）且 LSPosed 正常工作
 
 ## 构建
@@ -186,15 +183,16 @@ HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖�
 依赖：
 
 - JDK 17
-- Android SDK Platform 37（`platforms;android-37`）与 Build Tools `37.0.0`
+- Android SDK Platform 37（`platforms;android-37.0`）与 Build Tools `37.0.0`
+- Android NDK `30.0.14904198` 与 CMake `3.22.1`
 
 ```bash
 ./gradlew :app:assembleDebug --no-daemon        # debug
 ./gradlew :app:assembleRelease --no-daemon      # release（设置了 KEYSTORE_* 环境变量时使用正式签名）
-./gradlew :app:assembleDiag --no-daemon         # 诊断版（开启文件日志）
+./gradlew :app:assembleDiag --no-daemon         # 诊断版（开启 native 文件日志）
 ```
 
-产物命名遵循 `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk`，例如 `io.github.zilewang7.smallwindow-1.1.0.apk`（正式版）、`io.github.zilewang7.smallwindow-1.1.0_debug.apk`（debug）和 `io.github.zilewang7.smallwindow-1.1.0_debug_diag.apk`（诊断版）。正式版不带类型后缀，在 GitHub 的字母序附件列表中会排在最前。
+产物命名遵循 `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk`，例如 `io.github.zilewang7.smallwindow-1.2.0.apk`（正式版）、`io.github.zilewang7.smallwindow-1.2.0_debug.apk`（debug）和 `io.github.zilewang7.smallwindow-1.2.0_debug_diag.apk`（诊断版）。正式版不带类型后缀，在 GitHub 的字母序附件列表中会排在最前。
 
 GitHub Actions 会在每次 push 时构建 debug 产物；推送 `v*` 标签时，会自动创建同时附带签名正式版 APK（`io.github.zilewang7.smallwindow-*.apk`）与诊断版 APK（`io.github.zilewang7.smallwindow-*_debug_diag.apk`）的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
 
@@ -206,64 +204,58 @@ GitHub Actions 会在每次 push 时构建 debug 产物；推送 `v*` 标签时�
    adb push app-debug.apk /data/local/tmp/smallwindow.apk
    adb shell 'su -c "pm install -r /data/local/tmp/smallwindow.apk"'
    ```
-3. 打开 LSPosed 管理器，启用模块，并确认作用域包含 `system`（以及 `com.android.systemui`）；
+3. 打开 LSPosed 管理器，启用模块，并确认作用域包含 `com.miui.home`；
 4. 重启手机。
 
-Hook 运行在 `system_server` 中，因此模块必须重启后才能生效。
+新的 MiuiHome HYOS 子进程启动时才会加载 native entry，正常生效方式是完整重启。
 
 ## 调试
 
-查看过滤器的决策日志：
+查看 native 运行日志：
 
 ```bash
-adb logcat -s SmallWindowInputFilter:I
+adb logcat -s SmallWindowNative:I
 ```
 
-不用电脑时：安装诊断版（`io.github.zilewang7.smallwindow-*_debug_diag.apk`，每个 Release 都附带），复现手势后分享 `/data/system/smallwindow_filter.log`（root 可读；可用 root 文件管理器或 `su -c 'cp /data/system/smallwindow_filter.log /sdcard/Download/'` 导出）。
+不用电脑时：安装诊断版（`io.github.zilewang7.smallwindow-*_debug_diag.apk`，每个 Release 都附带），复现后分享 `/data/user_de/0/com.miui.home/cache/smallwindow_native.log`（root 可读；凭据加密存储的备用路径是 `/data/user/0/com.miui.home/cache/smallwindow_native.log`）。
 
 关键日志：
 
-- `candidate stream down ...` —— 检测到底部单指触摸流；
-- `second finger down targetX=... targetY=...` —— 第二指被吞掉并记录坐标；
-- `thumb up -> start synthetic glide to second finger` —— 拇指先松开；
-- `glide finished, targetX=... targetY=...` —— 合成滑动到达目标位置；
-- `index up, dropping into small window ...` —— 已注入最终的挂小窗 `ACTION_UP`。
+- `native entry initialized in MiuiHome HYOS child` —— LSPosed 已加载 APK native entry；
+- `installed HYOS hook-page guard` —— 运行时代码页清理保护已启用；
+- `MiuiHome 5361 HYOS runtime hook ready` —— 桌面 profile 精确匹配且 hook 已生效；
+- `kept second pointer on Home recognizer path` —— 已绕过本次第二指取消判定；
+- `unsupported MiuiHome native profile; no hook` —— 桌面版本不匹配，未修改系统行为。
 
-## 调参
+## Native profile
 
-所有时间参数都位于 `SmallWindowInputFilter.java` 顶部：
-
-| 常量 | 默认值 | 含义 |
-| --- | --- | --- |
-| `TELEPORT_DURATION_MS` | `180L` | 从拇指位置滑到食指位置的合成滑动时长。 |
-| `MIN_DROP_HOLD_MS` | `16L` | 落地前在目标位置的最小一帧停留时间。 |
-| `TICK_MS` | `16L` | 合成滑动的帧间隔。 |
-
-如果你的设备仍会误识别成“上滑回桌面”，请增大 `TELEPORT_DURATION_MS` 或 `MIN_DROP_HOLD_MS`。
+Native 偏移和不可变指纹位于 `smallwindow_native.cpp`。新的官方 MiuiHome 版本必须单独分析验证；不要复制相近版本偏移，也不要为了兼容官改或移植包而放宽匹配。
 
 ## 项目结构
 
 ```
 .
-├── .github/workflows/build.yml   # CI 构建
+├── .github/workflows/             # 构建、发布与商店同步
 ├── app/
-│   ├── build.gradle
+│   ├── build.gradle               # Android/NDK 变体与产物命名
 │   └── src/main/
-│       ├── AndroidManifest.xml
+│       ├── cpp/
+│       │   ├── CMakeLists.txt
+│       │   └── smallwindow_native.cpp # MiuiHome HYOS native entry
 │       ├── java/io.github.zilewang7.smallwindow/
-│       │   ├── MainHook.java              # LSPosed 入口，hook InputManagerService
-│       │   └── SmallWindowInputFilter.java # InputFilter 实现
-│       └── resources/META-INF/xposed/     # LSPosed 模块元数据
-│   ├── stubs/
-│   │   ├── inputfilter-stubs.jar          # 仅编译用的 android.view.InputFilter 桩
-│   │   └── src/android/view/InputFilter.java # 桩源码
+│       │   └── MainHook.java      # libxposed Java 元数据入口
+│       └── resources/META-INF/xposed/
+│           ├── native_init.list
+│           ├── module.prop
+│           └── scope.list         # com.miui.home
 ├── build.gradle
 ├── settings.gradle
-└── gradle/wrapper/                        # Gradle wrapper
+└── gradle/wrapper/
 ```
 
-`android.view.InputFilter` 不属于公开 Android SDK，因此使用一个最小化的编译期桩。该桩不会被打进 APK。
+Native payload 仅导出 `native_init`，只打包 `arm64-v8a`，ELF 段按 16 KB 对齐。
 
 ## 许可证
 
-[MIT](LICENSE)
+项目代码采用 [MIT](LICENSE) 许可证。改编的 native 集成代码及其声明见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

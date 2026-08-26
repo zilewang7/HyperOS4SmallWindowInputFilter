@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Ref (branch or tag) to build and sync, e.g. v1.1.0'
+        description: 'Ref (branch or tag) to build and sync, e.g. v1.2.0'
         required: false
         default: ''
 
@@ -32,7 +32,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools'
+          packages: 'platforms;android-37.0 build-tools;37.0.0 platform-tools ndk;30.0.14904198 cmake;3.22.1'
 
       - name: Decode release keystore
         env:
@@ -74,6 +74,7 @@ jobs:
           APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
           # Store tag format: VersionCode-VersionName (spaces in name -> _)
           TAG="${VERCODE}-${VERNAME// /_}"
+          export TAG
           ASSET_NAME="io.github.zilewang7.smallwindow-${VERNAME}.apk"
           API="https://api.github.com/repos/${STORE_REPO}"
           AUTH="Authorization: Bearer ${TOKEN}"

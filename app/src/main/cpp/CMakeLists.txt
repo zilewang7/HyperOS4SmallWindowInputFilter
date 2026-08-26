@@ -41,7 +41,7 @@ target_link_options(smallwindow_hyos PRIVATE
     -Wl,-z,max-page-size=16384
     -Wl,-z,common-page-size=16384
 )
-target_link_libraries(smallwindow_hyos PRIVATE log dl)
+target_link_libraries(smallwindow_hyos PRIVATE android log dl)
 
 set_target_properties(smallwindow_hyos PROPERTIES
     CXX_EXTENSIONS OFF

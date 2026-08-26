@@ -1,4 +1,6 @@
+#include <android/choreographer.h>
 #include <android/log.h>
+#include <dlfcn.h>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -27,45 +29,30 @@ constexpr char kSystemLauncherTail[] =
 constexpr size_t kMaxSegments = 16u;
 constexpr size_t kMaxSlots = 16u;
 constexpr size_t kMaxProtectedPages = 16u;
-
-// MiuiHome RELEASE-8.01.02.5361-260807-08161657-R.
-constexpr uintptr_t kEntryOffset = 0xc94b80u;
-constexpr uint8_t kEntryFingerprint[] = {
-        0xff, 0xc3, 0x04, 0xd1, 0xfd, 0x7b, 0x0d, 0xa9,
-        0xfc, 0x6f, 0x0e, 0xa9, 0xfa, 0x67, 0x0f, 0xa9,
-        0xf8, 0x5f, 0x10, 0xa9, 0xf6, 0x57, 0x11, 0xa9,
-        0xf4, 0x4f, 0x12, 0xa9, 0xfd, 0x43, 0x03, 0x91,
-        0xf9, 0x03, 0x08, 0xaa, 0xe6, 0x17, 0xeb, 0x97,
-        0xc0, 0x00, 0x00, 0x36, 0x86, 0x18, 0xeb, 0x97,
-};
-
-// Context around dispatch_to_inner_monitor's ACTION_POINTER_DOWN branch.
-constexpr uintptr_t kCancelContextOffset = 0x9086f0u;
-constexpr uint8_t kCancelContextFingerprint[] = {
-        0x88, 0x66, 0x41, 0xb9, 0x09, 0x01, 0x38, 0x1e,
-        0x0a, 0x05, 0x00, 0x51, 0x40, 0x01, 0x23, 0x1e,
-        0x3f, 0x01, 0x08, 0x6b, 0x04, 0xa9, 0x40, 0x7a,
-        0x08, 0xcc, 0x28, 0x1e, 0x88, 0x72, 0x40, 0xb9,
-        0x1f, 0x05, 0x00, 0x71, 0x21, 0x10, 0x00, 0x54,
-        0x80, 0x76, 0x40, 0xf9, 0xa0, 0x1b, 0x00, 0xb4,
-        0x68, 0xf1, 0x24, 0x94, 0x61, 0x00, 0x80, 0x52,
-        0xf9, 0x03, 0x00, 0xaa, 0x69, 0xf1, 0x24, 0x94,
-};
-
-// The 5361 inner monitor reads ACTION_POINTER_DOWN at this one call site
-// before synthesizing CANCEL and terminating the Home recognizer. Returning
-// MOVE only to that local decision keeps the real event unchanged for the
-// downstream launcher/Flutter recents path.
-constexpr uintptr_t kCancelDecisionReturnOffset = 0x9084bcu;
+constexpr size_t kActionSearchInstructions = 12u;
+constexpr size_t kCoordinateSearchInstructions = 8u;
+constexpr size_t kPrimaryActionSearchInstructions = 128u;
+constexpr size_t kPointerDownSearchInstructions = 192u;
+constexpr size_t kFunctionStartSearchInstructions = 256u;
+constexpr size_t kFunctionSetupInstructions = 32u;
+constexpr int64_t kTeleportDurationNanos = 180000000;
+constexpr int64_t kMinimumDropHoldNanos = 16000000;
 
 struct NativeApiEntries {
     uint32_t version;
-    int (*hook_func)(void* target, void* replacement, void** backup);
-    int (*unhook_func)(void* target);
+    void (*hook_func)(void* target, void* replacement, void** backup);
+    void (*unhook_func)(void* target);
 };
 
 using NativeOnLibraryLoaded = void (*)(const char* name, void* handle);
+using DispatchFn = void (*)(void* monitor, void* event, void* lock,
+                            uint32_t multi_finger_status);
 using MotionActionFn = int32_t (*)(void* event);
+using MotionIndexFn = size_t (*)(void* event);
+using MotionCoordinateFn = float (*)(void* event, size_t pointer_index);
+using MotionIdFn = int32_t (*)(void* event, size_t pointer_index);
+using MotionDropFn = void (*)(void* event);
+using NativeHookFn = void (*)(void* target, void* replacement, void** backup);
 using MadviseFn = int (*)(void* address, size_t length, int advice);
 
 struct Segment {
@@ -93,14 +80,65 @@ struct DynamicView {
     size_t dyn_rela_count;
 };
 
+struct PltEntries {
+    uintptr_t addresses[kMaxSlots];
+    size_t count;
+};
+
 struct HookPlan {
     void** slots[kMaxSlots];
     size_t slot_count;
     void* original;
 };
 
-uintptr_t g_launcher_base = 0u;
-MotionActionFn g_original_action_masked = nullptr;
+struct GestureStructure {
+    uintptr_t dispatch;
+    uint32_t gesture_type_offset;
+};
+
+struct ProjectionState {
+    bool active;
+    bool handed_off;
+    bool gliding;
+    bool glide_complete;
+    bool secondary_up;
+    bool frame_pending;
+    void* inner;
+    void* lock;
+    uint32_t multi_finger_status;
+    int32_t primary_id;
+    int32_t secondary_id;
+    int64_t down_time;
+    int64_t last_event_time;
+    int64_t glide_start_nanos;
+    int64_t last_move_nanos;
+    float start_x;
+    float start_y;
+    float target_x;
+    float target_y;
+    float last_x;
+    float last_y;
+};
+
+using MotionNewFn = void* (*)(int64_t down_time, int64_t event_time,
+                              int32_t action, int32_t pointer_id,
+                              float x, float y);
+
+NativeHookFn g_native_hook = nullptr;
+DispatchFn g_original_dispatch = nullptr;
+MotionActionFn g_motion_get_action = nullptr;
+MotionIndexFn g_motion_get_action_index = nullptr;
+MotionIndexFn g_motion_get_pointer_count = nullptr;
+MotionCoordinateFn g_motion_get_raw_x = nullptr;
+MotionCoordinateFn g_motion_get_raw_y = nullptr;
+MotionIdFn g_motion_get_pointer_id = nullptr;
+MotionDropFn g_motion_drop = nullptr;
+MotionNewFn g_motion_new = nullptr;
+int64_t (*g_motion_get_down_time)(void* event) = nullptr;
+int64_t (*g_motion_get_event_time)(void* event) = nullptr;
+uint32_t g_gesture_type_offset = 0u;
+thread_local ProjectionState g_projection{};
+thread_local uintptr_t g_projection_epoch = 1u;
 MadviseFn g_original_madvise = nullptr;
 uintptr_t g_guarded_runtime_base = 0u;
 volatile uint32_t g_guard_state = 0u;
@@ -411,11 +449,9 @@ bool CollectRelocations(const Image& image, const DynamicView& view,
     return true;
 }
 
-bool PreparePltHook(const Image& image, const char* symbol,
-                    void* replacement, HookPlan* output) {
-    if (symbol == nullptr || replacement == nullptr || output == nullptr) {
-        return false;
-    }
+bool CollectSymbolSlots(const Image& image, const char* symbol,
+                        HookPlan* output) {
+    if (symbol == nullptr || output == nullptr) return false;
     DynamicView view{};
     HookPlan plan{};
     if (!BuildDynamicView(image, &view) ||
@@ -426,6 +462,15 @@ bool PreparePltHook(const Image& image, const char* symbol,
             plan.slot_count == 0u) {
         return false;
     }
+    *output = plan;
+    return true;
+}
+
+bool PreparePltHook(const Image& image, const char* symbol,
+                    void* replacement, HookPlan* output) {
+    if (replacement == nullptr || output == nullptr) return false;
+    HookPlan plan{};
+    if (!CollectSymbolSlots(image, symbol, &plan)) return false;
     for (size_t i = 0u; i < plan.slot_count; ++i) {
         void* current = __atomic_load_n(plan.slots[i], __ATOMIC_ACQUIRE);
         if (current == replacement) continue;
@@ -604,94 +649,874 @@ bool EnsureMadviseGuard() {
     return true;
 }
 
-bool ValidateLauncherProfile(const Image& launcher) {
-    return IsLauncherLibraryPath(launcher.path) &&
-            RangeInImage(launcher, launcher.base + kEntryOffset,
-                         sizeof(kEntryFingerprint), PF_R | PF_X) &&
-            RangeInImage(launcher, launcher.base + kCancelContextOffset,
-                         sizeof(kCancelContextFingerprint), PF_R | PF_X) &&
-            memcmp(reinterpret_cast<void*>(launcher.base + kEntryOffset),
-                   kEntryFingerprint, sizeof(kEntryFingerprint)) == 0 &&
-            memcmp(reinterpret_cast<void*>(launcher.base + kCancelContextOffset),
-                   kCancelContextFingerprint,
-                   sizeof(kCancelContextFingerprint)) == 0;
-}
-
-int32_t HookActionMasked(void* event) {
-    MotionActionFn original = __atomic_load_n(&g_original_action_masked,
-                                              __ATOMIC_ACQUIRE);
-    if (original == nullptr) return -1;
-    const int32_t action = original(event);
-    const uintptr_t base = __atomic_load_n(&g_launcher_base,
-                                           __ATOMIC_ACQUIRE);
-    void* caller_ptr = __builtin_extract_return_addr(
-            __builtin_return_address(0));
-    const uintptr_t caller = reinterpret_cast<uintptr_t>(caller_ptr);
-    if (action == 5 && base != 0u && caller >= base &&
-            caller - base == kCancelDecisionReturnOffset) {
-        FileLog("kept second pointer on Home recognizer path");
-        return 2;
+bool AddSignedOffset(uintptr_t base, int64_t offset, uintptr_t* output) {
+    if (output == nullptr) return false;
+    if (offset >= 0) {
+        const uint64_t positive = static_cast<uint64_t>(offset);
+        if (positive > UINTPTR_MAX - base) return false;
+        *output = base + static_cast<uintptr_t>(positive);
+        return true;
     }
-    return action;
-}
-
-bool InstallLauncherHook(const Image& launcher) {
-    if (!ValidateLauncherProfile(launcher)) {
-        Log(ANDROID_LOG_WARN, "unsupported MiuiHome native profile; no hook");
-        return false;
-    }
-    HookPlan action_plan{};
-    if (!PreparePltHook(launcher, "input_MotionEvent_getActionMasked",
-                        reinterpret_cast<void*>(HookActionMasked),
-                        &action_plan)) {
-        Log(ANDROID_LOG_ERROR, "failed to resolve launcher MotionEvent hook");
-        return false;
-    }
-    for (size_t i = 0u; i < action_plan.slot_count; ++i) {
-        if (!AddProtectedPage(
-                    reinterpret_cast<uintptr_t>(action_plan.slots[i]))) {
-            return false;
-        }
-    }
-    if (!EnsureMadviseGuard()) {
-        Log(ANDROID_LOG_ERROR, "launcher hook rejected without page guard");
-        return false;
-    }
-    if (action_plan.original != nullptr) {
-        __atomic_store_n(&g_original_action_masked,
-                         reinterpret_cast<MotionActionFn>(action_plan.original),
-                         __ATOMIC_RELEASE);
-    }
-    if (__atomic_load_n(&g_original_action_masked, __ATOMIC_ACQUIRE) ==
-                    nullptr ||
-            !CommitPltHook(action_plan,
-                           reinterpret_cast<void*>(HookActionMasked))) {
-        Log(ANDROID_LOG_ERROR, "failed to install launcher runtime hook");
-        return false;
-    }
-    __atomic_store_n(&g_launcher_base, launcher.base, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_launcher_state, uint32_t{2}, __ATOMIC_RELEASE);
-    Log(ANDROID_LOG_INFO, "MiuiHome 5361 HYOS runtime hook ready");
+    const uint64_t magnitude = static_cast<uint64_t>(-(offset + 1)) + 1u;
+    if (magnitude > base) return false;
+    *output = base - static_cast<uintptr_t>(magnitude);
     return true;
 }
 
-void TryInstallLauncherHook(const char* hint) {
+bool ReadInstruction(const Image& image, uintptr_t address,
+                     uint32_t* output) {
+    if (output == nullptr || address % sizeof(uint32_t) != 0u ||
+            !RangeInImage(image, address, sizeof(uint32_t), PF_R | PF_X)) {
+        return false;
+    }
+    memcpy(output, reinterpret_cast<const void*>(address), sizeof(*output));
+    return true;
+}
+
+bool DecodeBlTarget(uint32_t instruction, uintptr_t pc, uintptr_t* output) {
+    if ((instruction & 0xfc000000u) != 0x94000000u) return false;
+    int64_t immediate = static_cast<int64_t>(instruction & 0x03ffffffu);
+    if ((immediate & (int64_t{1} << 25)) != 0) {
+        immediate -= int64_t{1} << 26;
+    }
+    return AddSignedOffset(pc, immediate * 4, output);
+}
+
+bool DecodeAdrpTarget(uint32_t instruction, uintptr_t pc,
+                      uintptr_t* output) {
+    if ((instruction & 0x9f000000u) != 0x90000000u) return false;
+    int64_t immediate = static_cast<int64_t>(
+            ((instruction >> 29) & 0x3u) |
+            (((instruction >> 5) & 0x7ffffu) << 2));
+    if ((immediate & (int64_t{1} << 20)) != 0) {
+        immediate -= int64_t{1} << 21;
+    }
+    return AddSignedOffset(pc & ~uintptr_t{0xfff}, immediate * 4096,
+                           output);
+}
+
+bool DecodePltSlot(const Image& image, uintptr_t address,
+                   uintptr_t* output) {
+    uint32_t adrp = 0u;
+    uint32_t load = 0u;
+    uint32_t add = 0u;
+    uint32_t branch = 0u;
+    if (!ReadInstruction(image, address, &adrp) ||
+            !ReadInstruction(image, address + 4u, &load) ||
+            !ReadInstruction(image, address + 8u, &add) ||
+            !ReadInstruction(image, address + 12u, &branch) ||
+            (adrp & 0x1fu) != 16u ||
+            (load & 0xffc003ffu) != 0xf9400211u ||
+            (add & 0xffc003ffu) != 0x91000210u ||
+            branch != 0xd61f0220u) {
+        return false;
+    }
+    const uintptr_t load_offset =
+            static_cast<uintptr_t>((load >> 10) & 0xfffu) * 8u;
+    const uintptr_t add_offset =
+            static_cast<uintptr_t>((add >> 10) & 0xfffu);
+    uintptr_t page = 0u;
+    if (load_offset != add_offset || !DecodeAdrpTarget(adrp, address, &page) ||
+            load_offset > UINTPTR_MAX - page) {
+        return false;
+    }
+    *output = page + load_offset;
+    return true;
+}
+
+bool AddPltEntry(uintptr_t address, PltEntries* entries) {
+    if (entries == nullptr) return false;
+    for (size_t i = 0u; i < entries->count; ++i) {
+        if (entries->addresses[i] == address) return true;
+    }
+    if (entries->count >= kMaxSlots) return false;
+    entries->addresses[entries->count++] = address;
+    return true;
+}
+
+bool FindPltEntries(const Image& image, const HookPlan& slots,
+                    PltEntries* output) {
+    if (output == nullptr || slots.slot_count == 0u) return false;
+    PltEntries entries{};
+    for (size_t segment_index = 0u;
+         segment_index < image.segment_count; ++segment_index) {
+        const Segment& segment = image.segments[segment_index];
+        if ((segment.flags & PF_X) == 0u) continue;
+        uintptr_t cursor = (segment.begin + 3u) & ~uintptr_t{3u};
+        while (cursor <= segment.end && segment.end - cursor >= 16u) {
+            uintptr_t slot = 0u;
+            if (DecodePltSlot(image, cursor, &slot)) {
+                bool matches = false;
+                for (size_t slot_index = 0u;
+                     slot_index < slots.slot_count; ++slot_index) {
+                    if (slot == reinterpret_cast<uintptr_t>(
+                                    slots.slots[slot_index])) {
+                        matches = true;
+                        break;
+                    }
+                }
+                if (matches && !AddPltEntry(cursor, &entries)) return false;
+                uint32_t prefix = 0u;
+                if (matches && cursor >= segment.begin + 4u &&
+                        ReadInstruction(image, cursor - 4u, &prefix) &&
+                        prefix == 0xd503245fu &&
+                        !AddPltEntry(cursor - 4u, &entries)) {
+                    return false;
+                }
+            }
+            cursor += 4u;
+        }
+    }
+    *output = entries;
+    return entries.count != 0u;
+}
+
+bool FindImportedPltEntries(const Image& image, const char* symbol,
+                            PltEntries* output) {
+    HookPlan slots{};
+    return CollectSymbolSlots(image, symbol, &slots) &&
+            FindPltEntries(image, slots, output);
+}
+
+bool IsCallTo(uint32_t instruction, uintptr_t pc,
+              const PltEntries& entries) {
+    uintptr_t target = 0u;
+    if (!DecodeBlTarget(instruction, pc, &target)) return false;
+    for (size_t i = 0u; i < entries.count; ++i) {
+        if (entries.addresses[i] == target) return true;
+    }
+    return false;
+}
+
+bool IsMovX(uint32_t instruction, uint32_t destination, uint32_t source) {
+    return destination < 32u && source < 32u &&
+            instruction == (0xaa0003e0u | (source << 16) | destination);
+}
+
+bool DecodeMovXToX0(uint32_t instruction, uint32_t* source) {
+    if (source == nullptr ||
+            (instruction & 0xffe0ffffu) != 0xaa0003e0u) {
+        return false;
+    }
+    *source = (instruction >> 16) & 0x1fu;
+    return *source != 31u;
+}
+
+bool DecodeMovWFromW0(uint32_t instruction, uint32_t* destination) {
+    if (destination == nullptr ||
+            (instruction & 0xffffffe0u) != 0x2a0003e0u) {
+        return false;
+    }
+    *destination = instruction & 0x1fu;
+    return *destination != 31u;
+}
+
+bool IsCmpWImmediate(uint32_t instruction, uint32_t source,
+                     uint32_t immediate) {
+    return source < 32u && immediate < 4096u &&
+            instruction == (0x7100001fu | (immediate << 10) |
+                            (source << 5));
+}
+
+bool IsConditionalBranch(uint32_t instruction, uint32_t condition) {
+    return condition < 16u &&
+            (instruction & 0xff000010u) == 0x54000000u &&
+            (instruction & 0xfu) == condition;
+}
+
+bool DecodeConditionalBranchTarget(uint32_t instruction, uintptr_t pc,
+                                   uint32_t condition,
+                                   uintptr_t* output) {
+    if (!IsConditionalBranch(instruction, condition)) return false;
+    int64_t immediate = static_cast<int64_t>((instruction >> 5) & 0x7ffffu);
+    if ((immediate & (int64_t{1} << 18)) != 0) {
+        immediate -= int64_t{1} << 19;
+    }
+    return AddSignedOffset(pc, immediate * 4, output);
+}
+
+bool HasCoordinateArguments(const Image& image, uintptr_t call,
+                            uint32_t event_register) {
+    for (size_t distance = 2u; distance <= 4u; ++distance) {
+        if (call < distance * 4u) continue;
+        uint32_t first = 0u;
+        uint32_t second = 0u;
+        const uintptr_t setup = call - distance * 4u;
+        if (ReadInstruction(image, setup, &first) &&
+                ReadInstruction(image, setup + 4u, &second) &&
+                IsMovX(first, 0u, event_register) &&
+                IsMovX(second, 1u, 31u)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
+                              const PltEntries& action_entries,
+                              const PltEntries& raw_x_entries,
+                              const PltEntries& raw_y_entries,
+                              const PltEntries& clone_entries,
+                              const PltEntries& set_action_entries,
+                              uintptr_t* cancel_set_call) {
+    if (cancel_set_call == nullptr) return false;
+    uint32_t instruction = 0u;
+    uint32_t event_register = 0u;
+    uint32_t action_register = 0u;
+    if (action_call < 4u ||
+            !ReadInstruction(image, action_call - 4u, &instruction) ||
+            !DecodeMovXToX0(instruction, &event_register) ||
+            !ReadInstruction(image, action_call, &instruction) ||
+            !IsCallTo(instruction, action_call, action_entries) ||
+            !ReadInstruction(image, action_call + 4u, &instruction) ||
+            !IsCmpWImmediate(instruction, 0u, 13u) ||
+            !ReadInstruction(image, action_call + 8u, &instruction) ||
+            !IsConditionalBranch(instruction, 2u) ||
+            !ReadInstruction(image, action_call + 12u, &instruction) ||
+            !DecodeMovWFromW0(instruction, &action_register)) {
+        return false;
+    }
+
+    uintptr_t raw_x_call = 0u;
+    for (size_t i = 4u; i <= kActionSearchInstructions; ++i) {
+        const uintptr_t candidate = action_call + i * 4u;
+        if (ReadInstruction(image, candidate, &instruction) &&
+                IsCallTo(instruction, candidate, raw_x_entries) &&
+                HasCoordinateArguments(image, candidate, event_register)) {
+            raw_x_call = candidate;
+            break;
+        }
+    }
+    if (raw_x_call == 0u) return false;
+
+    uintptr_t raw_y_call = 0u;
+    for (size_t i = 1u; i <= kCoordinateSearchInstructions; ++i) {
+        const uintptr_t candidate = raw_x_call + i * 4u;
+        if (ReadInstruction(image, candidate, &instruction) &&
+                IsCallTo(instruction, candidate, raw_y_entries) &&
+                HasCoordinateArguments(image, candidate, event_register)) {
+            raw_y_call = candidate;
+            break;
+        }
+    }
+    if (raw_y_call == 0u) return false;
+
+    bool action_move_check = false;
+    for (size_t i = 1u; i <= 4u; ++i) {
+        if (ReadInstruction(image, raw_y_call + i * 4u, &instruction) &&
+                IsCmpWImmediate(instruction, action_register, 2u)) {
+            action_move_check = true;
+            break;
+        }
+    }
+    if (!action_move_check) return false;
+
+    for (size_t i = 1u; i <= kPointerDownSearchInstructions; ++i) {
+        const uintptr_t pointer_check = raw_y_call + i * 4u;
+        uint32_t branch = 0u;
+        if (!ReadInstruction(image, pointer_check, &instruction) ||
+                !IsCmpWImmediate(instruction, action_register, 5u) ||
+                !ReadInstruction(image, pointer_check + 4u, &branch) ||
+                !IsConditionalBranch(branch, 1u)) {
+            continue;
+        }
+        for (size_t j = 2u; j <= 64u; ++j) {
+            const uintptr_t clone_call = pointer_check + j * 4u;
+            if (!ReadInstruction(image, clone_call, &instruction) ||
+                    !IsCallTo(instruction, clone_call, clone_entries)) {
+                continue;
+            }
+            for (size_t k = 1u; k <= 5u; ++k) {
+                const uintptr_t set_call = clone_call + k * 4u;
+                if (!ReadInstruction(image, set_call, &instruction) ||
+                        !IsCallTo(instruction, set_call,
+                                  set_action_entries)) {
+                    continue;
+                }
+                for (size_t back = 1u; back <= 3u && back <= k; ++back) {
+                    uint32_t argument = 0u;
+                    if (ReadInstruction(image, set_call - back * 4u,
+                                        &argument) &&
+                            argument == 0x52800061u) {
+                        *cancel_set_call = set_call;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool LocatePrimaryActionDecision(const Image& image,
+                                 uintptr_t secondary_action_call,
+                                 const PltEntries& action_entries,
+                                 uintptr_t* output) {
+    if (output == nullptr || secondary_action_call < 4u) return false;
+    uint32_t instruction = 0u;
+    uint32_t event_register = 0u;
+    if (!ReadInstruction(image, secondary_action_call - 4u, &instruction) ||
+            !DecodeMovXToX0(instruction, &event_register)) {
+        return false;
+    }
+    const uintptr_t expected_branch_target = secondary_action_call + 12u;
+    uintptr_t match = 0u;
+    size_t match_count = 0u;
+    for (size_t distance = 1u;
+         distance <= kPrimaryActionSearchInstructions; ++distance) {
+        const size_t byte_distance = distance * 4u;
+        if (secondary_action_call < byte_distance + 4u) break;
+        const uintptr_t candidate = secondary_action_call - byte_distance;
+        uint32_t setup = 0u;
+        uint32_t compare = 0u;
+        uint32_t branch = 0u;
+        uintptr_t branch_target = 0u;
+        if (!ReadInstruction(image, candidate - 4u, &setup) ||
+                !IsMovX(setup, 0u, event_register) ||
+                !ReadInstruction(image, candidate, &instruction) ||
+                !IsCallTo(instruction, candidate, action_entries) ||
+                !ReadInstruction(image, candidate + 4u, &compare) ||
+                !IsCmpWImmediate(compare, 0u, 13u) ||
+                !ReadInstruction(image, candidate + 8u, &branch) ||
+                !DecodeConditionalBranchTarget(branch, candidate + 8u, 3u,
+                                               &branch_target) ||
+                branch_target != expected_branch_target) {
+            continue;
+        }
+        match = candidate + 4u;
+        ++match_count;
+        if (match_count > 1u) return false;
+    }
+    if (match_count != 1u) return false;
+    *output = match;
+    return true;
+}
+
+bool FindDispatchStart(const Image& image, uintptr_t action_call,
+                       uintptr_t* output) {
+    if (output == nullptr) return false;
+    constexpr uint32_t prologue[] = {
+            0xd10703ffu, 0xfd00a3eau, 0x6d1523e9u, 0xa9167bfdu,
+            0xa9176ffcu, 0xa91867fau, 0xa9195ff8u, 0xa91a57f6u,
+            0xa91b4ff4u, 0x910583fdu,
+    };
+    uintptr_t match = 0u;
+    size_t match_count = 0u;
+    for (size_t distance = 1u;
+         distance <= kFunctionStartSearchInstructions; ++distance) {
+        const size_t bytes = distance * sizeof(uint32_t);
+        if (action_call < bytes) break;
+        const uintptr_t candidate = action_call - bytes;
+        bool valid = true;
+        for (size_t i = 0u; i < sizeof(prologue) / sizeof(prologue[0]); ++i) {
+            uint32_t instruction = 0u;
+            if (!ReadInstruction(image, candidate + i * 4u, &instruction) ||
+                    instruction != prologue[i]) {
+                valid = false;
+                break;
+            }
+        }
+        uint32_t object_load = 0u;
+        if (!valid ||
+                !ReadInstruction(image, candidate + sizeof(prologue),
+                                 &object_load) ||
+                (object_load & 0xffc003ffu) != 0xf9400008u) {
+            continue;
+        }
+        match = candidate;
+        ++match_count;
+        if (match_count > 1u) return false;
+    }
+    if (match_count != 1u) return false;
+    *output = match;
+    return true;
+}
+
+bool DecodeGestureTypeOffset(const Image& image, uintptr_t cancel_set_call,
+                             uint32_t* output) {
+    if (output == nullptr) return false;
+    uint32_t match = 0u;
+    size_t match_count = 0u;
+    for (size_t distance = 1u;
+         distance <= kFunctionSetupInstructions; ++distance) {
+        const size_t bytes = distance * sizeof(uint32_t);
+        if (cancel_set_call < bytes) break;
+        const uintptr_t candidate = cancel_set_call - bytes;
+        uint32_t load = 0u;
+        uint32_t compare = 0u;
+        if (!ReadInstruction(image, candidate, &load) ||
+                (load & 0xffc003ffu) != 0xb9400288u ||
+                !ReadInstruction(image, candidate + 4u, &compare) ||
+                !IsCmpWImmediate(compare, 8u, 1u)) {
+            continue;
+        }
+        match = ((load >> 10) & 0xfffu) * sizeof(uint32_t);
+        ++match_count;
+        if (match_count > 1u) return false;
+    }
+    if (match_count != 1u || match > 0x1000u) return false;
+    *output = match;
+    return true;
+}
+
+bool LocateGestureStructure(const Image& launcher, GestureStructure* output) {
+    if (output == nullptr || !IsLauncherLibraryPath(launcher.path)) {
+        return false;
+    }
+    PltEntries action_entries{};
+    PltEntries raw_x_entries{};
+    PltEntries raw_y_entries{};
+    PltEntries clone_entries{};
+    PltEntries set_action_entries{};
+    if (!FindImportedPltEntries(
+                    launcher, "input_MotionEvent_getActionMasked",
+                    &action_entries) ||
+            !FindImportedPltEntries(launcher, "input_MotionEvent_getRawX",
+                                   &raw_x_entries) ||
+            !FindImportedPltEntries(launcher, "input_MotionEvent_getRawY",
+                                   &raw_y_entries) ||
+            !FindImportedPltEntries(launcher, "input_MotionEvent_clone",
+                                   &clone_entries) ||
+            !FindImportedPltEntries(launcher, "input_MotionEvent_setAction",
+                                   &set_action_entries)) {
+        return false;
+    }
+
+    GestureStructure match{};
+    size_t match_count = 0u;
+    for (size_t segment_index = 0u;
+         segment_index < launcher.segment_count; ++segment_index) {
+        const Segment& segment = launcher.segments[segment_index];
+        if ((segment.flags & PF_X) == 0u) continue;
+        uintptr_t cursor = (segment.begin + 3u) & ~uintptr_t{3u};
+        while (cursor <= segment.end && segment.end - cursor >= 4u) {
+            uint32_t instruction = 0u;
+            uintptr_t cancel_set_call = 0u;
+            uintptr_t primary_decision = 0u;
+            GestureStructure candidate{};
+            if (ReadInstruction(launcher, cursor, &instruction) &&
+                    IsCallTo(instruction, cursor, action_entries) &&
+                    ValidateGestureCandidate(
+                            launcher, cursor, action_entries, raw_x_entries,
+                            raw_y_entries, clone_entries, set_action_entries,
+                            &cancel_set_call) &&
+                    LocatePrimaryActionDecision(
+                            launcher, cursor, action_entries,
+                            &primary_decision) &&
+                    FindDispatchStart(launcher, cursor,
+                                      &candidate.dispatch) &&
+                    DecodeGestureTypeOffset(
+                            launcher, cancel_set_call,
+                            &candidate.gesture_type_offset)) {
+                match = candidate;
+                ++match_count;
+                if (match_count > 1u) return false;
+            }
+            cursor += 4u;
+        }
+    }
+    if (match_count != 1u) return false;
+    *output = match;
+    return true;
+}
+
+bool ResolveMotionApi(void* handle) {
+    if (handle == nullptr) return false;
+    g_motion_get_action = reinterpret_cast<MotionActionFn>(
+            dlsym(handle, "input_MotionEvent_getActionMasked"));
+    g_motion_get_action_index = reinterpret_cast<MotionIndexFn>(
+            dlsym(handle, "input_MotionEvent_getActionIndex"));
+    g_motion_get_pointer_count = reinterpret_cast<MotionIndexFn>(
+            dlsym(handle, "input_MotionEvent_getPointerCount"));
+    g_motion_get_raw_x = reinterpret_cast<MotionCoordinateFn>(
+            dlsym(handle, "input_MotionEvent_getRawX"));
+    g_motion_get_raw_y = reinterpret_cast<MotionCoordinateFn>(
+            dlsym(handle, "input_MotionEvent_getRawY"));
+    g_motion_get_pointer_id = reinterpret_cast<MotionIdFn>(
+            dlsym(handle, "input_MotionEvent_getPointerId"));
+    g_motion_get_down_time = reinterpret_cast<int64_t (*)(void*)>(
+            dlsym(handle, "input_MotionEvent_getDownTime"));
+    g_motion_get_event_time = reinterpret_cast<int64_t (*)(void*)>(
+            dlsym(handle, "input_MotionEvent_getEventTime"));
+    g_motion_new = reinterpret_cast<MotionNewFn>(
+            dlsym(handle, "input_MotionEvent_new"));
+    g_motion_drop = reinterpret_cast<MotionDropFn>(
+            dlsym(handle, "input_MotionEvent_drop"));
+    return g_motion_get_action != nullptr &&
+            g_motion_get_action_index != nullptr &&
+            g_motion_get_pointer_count != nullptr &&
+            g_motion_get_raw_x != nullptr &&
+            g_motion_get_raw_y != nullptr &&
+            g_motion_get_pointer_id != nullptr &&
+            g_motion_get_down_time != nullptr &&
+            g_motion_get_event_time != nullptr &&
+            g_motion_new != nullptr && g_motion_drop != nullptr;
+}
+
+int32_t ReadGestureType(void* monitor, void* state) {
+    int32_t value = 0;
+    if (state == nullptr && monitor != nullptr) {
+        state = static_cast<uint8_t*>(monitor) + 0x20u;
+    }
+    if (state != nullptr && g_gesture_type_offset != 0u) {
+        memcpy(&value,
+               static_cast<uint8_t*>(state) + g_gesture_type_offset,
+               sizeof(value));
+    }
+    return value;
+}
+
+bool FindPointerIndex(void* event, int32_t pointer_id, size_t* output) {
+    if (event == nullptr || output == nullptr) return false;
+    const size_t count = g_motion_get_pointer_count(event);
+    for (size_t i = 0u; i < count; ++i) {
+        if (g_motion_get_pointer_id(event, i) == pointer_id) {
+            *output = i;
+            return true;
+        }
+    }
+    return false;
+}
+
+int64_t MonotonicNanos() {
+    timespec now{};
+    return clock_gettime(CLOCK_MONOTONIC, &now) == 0
+            ? static_cast<int64_t>(now.tv_sec) * 1000000000LL + now.tv_nsec
+            : 0;
+}
+
+void ResetProjection() {
+    ++g_projection_epoch;
+    if (g_projection_epoch == 0u) ++g_projection_epoch;
+    g_projection = {};
+}
+
+bool DispatchProjected(void* monitor, void* lock,
+                       uint32_t multi_finger_status, int32_t action,
+                       float x, float y, int64_t event_time,
+                       int64_t dispatch_nanos) {
+    if (g_original_dispatch == nullptr || g_motion_new == nullptr ||
+            g_motion_drop == nullptr) {
+        return false;
+    }
+    if (event_time <= g_projection.last_event_time) {
+        event_time = g_projection.last_event_time + 1;
+    }
+    void* projected = g_motion_new(
+            g_projection.down_time, event_time, action,
+            g_projection.primary_id, x, y);
+    if (projected == nullptr) return false;
+    g_projection.last_event_time = event_time;
+    g_projection.last_x = x;
+    g_projection.last_y = y;
+    if (action == 2) g_projection.last_move_nanos = dispatch_nanos;
+    g_original_dispatch(monitor, projected, lock, multi_finger_status);
+    g_motion_drop(projected);
+    return true;
+}
+
+void OnProjectionFrame(int64_t frame_time_nanos, void* data);
+
+bool ScheduleProjectionFrame() {
+    if (g_projection.frame_pending) return true;
+    AChoreographer* choreographer = AChoreographer_getInstance();
+    if (choreographer == nullptr) return false;
+    g_projection.frame_pending = true;
+    AChoreographer_postFrameCallback64(
+            choreographer, OnProjectionFrame,
+            reinterpret_cast<void*>(g_projection_epoch));
+    return true;
+}
+
+void FinishProjectionAfterHold(int64_t frame_time_nanos) {
+    if (!g_projection.active || !g_projection.handed_off ||
+            !g_projection.secondary_up) {
+        return;
+    }
+    if (frame_time_nanos - g_projection.last_move_nanos <
+                    kMinimumDropHoldNanos &&
+            ScheduleProjectionFrame()) {
+        return;
+    }
+    const bool dispatched = DispatchProjected(
+            g_projection.inner, g_projection.lock,
+            g_projection.multi_finger_status, 1,
+            g_projection.target_x, g_projection.target_y,
+            frame_time_nanos / 1000000LL, frame_time_nanos);
+    if (dispatched) FileLog("dropped Home drag from second pointer");
+    ResetProjection();
+}
+
+void OnProjectionFrame(int64_t frame_time_nanos, void* data) {
+    const uintptr_t epoch = reinterpret_cast<uintptr_t>(data);
+    if (epoch != g_projection_epoch) return;
+    g_projection.frame_pending = false;
+    if (!g_projection.active || !g_projection.handed_off) return;
+
+    if (!g_projection.gliding) {
+        FinishProjectionAfterHold(frame_time_nanos);
+        return;
+    }
+
+    const int64_t elapsed = frame_time_nanos -
+            g_projection.glide_start_nanos;
+    float progress = static_cast<float>(elapsed) /
+            static_cast<float>(kTeleportDurationNanos);
+    if (progress < 0.0f) progress = 0.0f;
+    if (progress > 1.0f) progress = 1.0f;
+    const float remaining = 1.0f - progress;
+    const float eased = 1.0f - remaining * remaining * remaining;
+    const float x = g_projection.start_x +
+            (g_projection.target_x - g_projection.start_x) * eased;
+    const float y = g_projection.start_y +
+            (g_projection.target_y - g_projection.start_y) * eased;
+    if (!DispatchProjected(
+                g_projection.inner, g_projection.lock,
+                g_projection.multi_finger_status, 2, x, y,
+                frame_time_nanos / 1000000LL, frame_time_nanos)) {
+        ResetProjection();
+        return;
+    }
+
+    if (progress < 1.0f && ScheduleProjectionFrame()) return;
+    g_projection.gliding = false;
+    g_projection.glide_complete = true;
+    FileLog("finished smooth Home handoff glide");
+    if (g_projection.secondary_up && !ScheduleProjectionFrame()) {
+        FinishProjectionAfterHold(frame_time_nanos);
+    }
+}
+
+void HookDispatch(void* monitor, void* event, void* lock,
+                  uint32_t multi_finger_status) {
+    if (g_original_dispatch == nullptr || event == nullptr) return;
+    const int32_t action = g_motion_get_action(event);
+    const size_t count = g_motion_get_pointer_count(event);
+    const int64_t event_time = g_motion_get_event_time(event);
+    const int64_t now_nanos = MonotonicNanos();
+
+    if (action == 0) {
+        if (g_projection.active) {
+            DispatchProjected(
+                    g_projection.inner, g_projection.lock,
+                    g_projection.multi_finger_status, 1,
+                    g_projection.last_x, g_projection.last_y,
+                    event_time, now_nanos);
+        }
+        ResetProjection();
+        if (count == 1u) {
+            g_projection.inner = monitor;
+            g_projection.primary_id = g_motion_get_pointer_id(event, 0u);
+            g_projection.down_time = g_motion_get_down_time(event);
+            g_projection.last_event_time = event_time;
+            g_projection.last_move_nanos = now_nanos;
+            g_projection.last_x = g_motion_get_raw_x(event, 0u);
+            g_projection.last_y = g_motion_get_raw_y(event, 0u);
+        }
+        g_original_dispatch(monitor, event, lock, multi_finger_status);
+        return;
+    }
+
+    if (!g_projection.active && action == 2 && count == 1u &&
+            g_projection.inner == monitor) {
+        g_projection.last_event_time = event_time;
+        g_projection.last_move_nanos = now_nanos;
+        g_projection.last_x = g_motion_get_raw_x(event, 0u);
+        g_projection.last_y = g_motion_get_raw_y(event, 0u);
+    }
+
+    if (!g_projection.active && action == 5 && count == 2u &&
+            g_projection.inner == monitor &&
+            ReadGestureType(monitor, lock) == 1) {
+        const size_t secondary_index = g_motion_get_action_index(event);
+        size_t primary_index = 0u;
+        if (secondary_index < count &&
+                FindPointerIndex(event, g_projection.primary_id,
+                                 &primary_index) &&
+                primary_index != secondary_index) {
+            g_projection.active = true;
+            g_projection.secondary_id =
+                    g_motion_get_pointer_id(event, secondary_index);
+            g_projection.target_x =
+                    g_motion_get_raw_x(event, secondary_index);
+            g_projection.target_y =
+                    g_motion_get_raw_y(event, secondary_index);
+            FileLog("captured second pointer for Home handoff");
+            if (DispatchProjected(
+                        monitor, lock, multi_finger_status, 2,
+                        g_motion_get_raw_x(event, primary_index),
+                        g_motion_get_raw_y(event, primary_index),
+                        event_time, now_nanos)) {
+                return;
+            }
+            ResetProjection();
+        }
+    }
+
+    if (g_projection.active && g_projection.inner == monitor) {
+        if (action == 2) {
+            const int32_t followed_id = g_projection.handed_off
+                    ? g_projection.secondary_id : g_projection.primary_id;
+            size_t followed_index = 0u;
+            if (FindPointerIndex(event, followed_id, &followed_index)) {
+                const float x = g_motion_get_raw_x(event, followed_index);
+                const float y = g_motion_get_raw_y(event, followed_index);
+                if (g_projection.gliding) {
+                    g_projection.target_x = x;
+                    g_projection.target_y = y;
+                    return;
+                }
+                if (DispatchProjected(
+                            monitor, lock, multi_finger_status, 2,
+                            x, y, event_time, now_nanos)) {
+                    return;
+                }
+            }
+        } else if (action == 6) {
+            const size_t lifted_index = g_motion_get_action_index(event);
+            if (lifted_index < count) {
+                const int32_t lifted_id =
+                        g_motion_get_pointer_id(event, lifted_index);
+                const int32_t remaining_id = lifted_id == g_projection.primary_id
+                        ? g_projection.secondary_id : g_projection.primary_id;
+                size_t remaining_index = 0u;
+                if (FindPointerIndex(event, remaining_id, &remaining_index)) {
+                    const float x = g_motion_get_raw_x(event, remaining_index);
+                    const float y = g_motion_get_raw_y(event, remaining_index);
+                    if (lifted_id == g_projection.primary_id) {
+                        g_projection.handed_off = true;
+                        g_projection.gliding = true;
+                        g_projection.glide_complete = false;
+                        g_projection.secondary_up = false;
+                        g_projection.inner = monitor;
+                        g_projection.lock = lock;
+                        g_projection.multi_finger_status =
+                                multi_finger_status;
+                        g_projection.start_x =
+                                g_motion_get_raw_x(event, lifted_index);
+                        g_projection.start_y =
+                                g_motion_get_raw_y(event, lifted_index);
+                        g_projection.target_x = x;
+                        g_projection.target_y = y;
+                        g_projection.glide_start_nanos = now_nanos;
+                        FileLog("started smooth Home handoff glide");
+                        if (!ScheduleProjectionFrame()) {
+                            g_projection.gliding = false;
+                            g_projection.glide_complete = true;
+                            DispatchProjected(
+                                    monitor, lock, multi_finger_status, 2,
+                                    x, y, event_time, now_nanos);
+                        }
+                        return;
+                    }
+                    const bool dispatched = DispatchProjected(
+                            monitor, lock, multi_finger_status, 2,
+                            x, y, event_time, now_nanos);
+                    ResetProjection();
+                    if (dispatched) return;
+                }
+            }
+        } else if (action == 1 && g_projection.handed_off) {
+            size_t secondary_index = 0u;
+            if (FindPointerIndex(event, g_projection.secondary_id,
+                                 &secondary_index)) {
+                g_projection.target_x =
+                        g_motion_get_raw_x(event, secondary_index);
+                g_projection.target_y =
+                        g_motion_get_raw_y(event, secondary_index);
+            }
+            g_projection.secondary_up = true;
+            g_projection.inner = monitor;
+            g_projection.lock = lock;
+            g_projection.multi_finger_status = multi_finger_status;
+            if (!g_projection.gliding && g_projection.glide_complete &&
+                    now_nanos - g_projection.last_move_nanos >=
+                            kMinimumDropHoldNanos) {
+                const bool dispatched = DispatchProjected(
+                        monitor, lock, multi_finger_status, 1,
+                        g_projection.target_x, g_projection.target_y,
+                        event_time, now_nanos);
+                ResetProjection();
+                if (dispatched) {
+                    FileLog("dropped Home drag from second pointer");
+                    return;
+                }
+            }
+            if (!ScheduleProjectionFrame()) {
+                DispatchProjected(
+                        monitor, lock, multi_finger_status, 1,
+                        g_projection.target_x, g_projection.target_y,
+                        event_time, now_nanos);
+                FileLog("dropped Home drag without frame scheduler");
+                ResetProjection();
+            }
+            return;
+        } else if (action == 3) {
+            const bool dispatched = DispatchProjected(
+                    monitor, lock, multi_finger_status, 3,
+                    g_projection.last_x, g_projection.last_y,
+                    event_time, now_nanos);
+            ResetProjection();
+            if (dispatched) return;
+        }
+    }
+
+    if (action == 1 || action == 3) ResetProjection();
+    g_original_dispatch(monitor, event, lock, multi_finger_status);
+}
+
+bool InstallLauncherHook(const Image& launcher, void* handle) {
+    if (__atomic_load_n(&g_launcher_state, __ATOMIC_ACQUIRE) == 2u) {
+        return true;
+    }
+    uint32_t expected = 0u;
+    if (!__atomic_compare_exchange_n(&g_launcher_state, &expected,
+                                     uint32_t{1}, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE)) {
+        return expected == 2u;
+    }
+    GestureStructure structure{};
+    if (!LocateGestureStructure(launcher, &structure) ||
+            !ResolveMotionApi(handle) || g_native_hook == nullptr ||
+            !AddProtectedPage(structure.dispatch) || !EnsureMadviseGuard()) {
+        __atomic_store_n(&g_launcher_state, uint32_t{3}, __ATOMIC_RELEASE);
+        Log(ANDROID_LOG_WARN,
+            "MiuiHome gesture structure missing or ambiguous; no hook");
+        return false;
+    }
+    void* original = nullptr;
+    g_gesture_type_offset = structure.gesture_type_offset;
+    g_native_hook(reinterpret_cast<void*>(structure.dispatch),
+                  reinterpret_cast<void*>(HookDispatch), &original);
+    if (original == nullptr) {
+        g_gesture_type_offset = 0u;
+        __atomic_store_n(&g_launcher_state, uint32_t{3}, __ATOMIC_RELEASE);
+        Log(ANDROID_LOG_ERROR, "failed to install launcher dispatch hook");
+        return false;
+    }
+    g_original_dispatch = reinterpret_cast<DispatchFn>(original);
+    __atomic_store_n(&g_launcher_state, uint32_t{2}, __ATOMIC_RELEASE);
+    Log(ANDROID_LOG_INFO, "MiuiHome gesture structure matched; hook ready");
+    return true;
+}
+
+void TryInstallLauncherHook(const char* hint, void* handle) {
+    if (handle == nullptr) return;
     Image launcher{};
     if ((hint == nullptr || !FindImage(hint, 0u, &launcher)) &&
             !FindImage(kLauncherName, 0u, &launcher)) {
         return;
     }
-    InstallLauncherHook(launcher);
+    InstallLauncherHook(launcher, handle);
 }
 
-void OnLibraryLoaded(const char* name, void*) {
+void OnLibraryLoaded(const char* name, void* handle) {
     if (name == nullptr || !IsLauncherHyosProcess()) return;
     if (EndsWith(name, kHyperRuntimeName)) {
         EnsureMadviseGuard();
-        TryInstallLauncherHook(nullptr);
     }
     if (IsLauncherLibraryPath(name)) {
-        TryInstallLauncherHook(name);
+        TryInstallLauncherHook(name, handle);
     }
 }
 
@@ -703,6 +1528,7 @@ NativeOnLibraryLoaded native_init(const NativeApiEntries* entries) {
             entries->unhook_func == nullptr || !IsLauncherHyosProcess()) {
         return nullptr;
     }
+    g_native_hook = entries->hook_func;
     Log(ANDROID_LOG_INFO, "native entry initialized in MiuiHome HYOS child");
     return OnLibraryLoaded;
 }

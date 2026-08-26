@@ -12,8 +12,8 @@ On older HyperOS/MIUI versions, while an app is foreground you could:
 
 1. Swipe up from the bottom edge with your thumb and keep holding (enters recents drag, the window follows your thumb).
 2. Press anywhere with your index finger (nothing visible happens yet).
-3. Release your thumb — the window is dragged/teleported to the index-finger position.
-4. Release your index finger — the window drops into small-window mode there.
+3. Release your thumb — the window glides to the index-finger position over 180 ms.
+4. Move the index finger if needed, then release it to drop the window into small-window mode there.
 
 On HyperOS 4 this was broken: the second finger cancels the recents drag and the window snaps back to the foreground app. This module restores the launcher-native two-finger route.
 
@@ -21,23 +21,23 @@ On HyperOS 4 this was broken: the second finger cancels the recents drag and the
 
 - HyperOS 4 MiuiHome (`com.miui.home`) is a native HYOS application spawned by `/system_ext/bin/hyos_spawner`; it does not run on ART.
 - Zygisk Next 1.5.0+ exposes the HYOS application-specialization lifecycle. LSPosed IT 2.1.1+ uses it to load this APK's `META-INF/xposed/native_init.list` entry into the scoped MiuiHome process.
-- The arm64 payload validates the exact process, launcher image, entry point, and cancellation-path fingerprints before installing anything.
-- MiuiHome 5361 locally interprets the second finger as a move only at the decision that would otherwise cancel the Home drag. The real multi-pointer event remains unchanged for the downstream launcher/Flutter recents path, allowing the launcher to perform its original handoff and drop behavior.
-- HYOS may remap APK-backed runtime pages. The module protects its PLT hook pages from runtime cleanup and can reapply the caller-local hook without pinning a `hyos_spawner` Build ID.
-- Unsupported or ambiguous launcher layouts fail closed and preserve Xiaomi's original behavior.
+- The arm64 payload validates the process and launcher image, resolves imported MotionEvent APIs, and scans AArch64 executable code for one unambiguous gesture-dispatch structure before installing anything.
+- Inside that matched launcher boundary, physical two-finger input is projected into one continuous drag stream. The stream keeps the thumb pointer ID and down time, follows the thumb until release, then uses Choreographer frames and cubic ease-out to glide for 180 ms toward the live index-finger target.
+- Releasing the index finger early waits for the glide to finish. The final `UP` is emitted only after the target has remained stable for at least one 16 ms frame; cancellation and new-gesture paths invalidate pending frame callbacks and end the active synthetic stream.
+- HYOS may discard APK-backed runtime pages. The module guards the hooked pages from `MADV_DONTNEED` without pinning a `hyos_spawner` Build ID or MiuiHome version.
+- Missing or ambiguous launcher structures fail closed and preserve Xiaomi's original behavior.
 
 This runtime architecture follows the current native integration in [MiuiBackGestureHook](https://github.com/wxxsfxyzm/MiuiBackGestureHook).
 
 ## Compatibility
 
-Validated target profile:
+Validated official configurations:
 
-- Xiaomi 17 Pro Max (`2509FPN0BC`)
-- HyperOS `OS4.0.0.20.XPBCNXM`, Android 17 (SDK 37)
-- MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
-- arm64-v8a
+- Xiaomi 17 Pro Max (`2509FPN0BC`), Android 17 (SDK 37), arm64-v8a
+- HyperOS `OS4.0.0.20.XPBCNXM` with MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
+- HyperOS `OS4.0.0.25.XPBCNXM` with MiuiHome `801025459` / `RELEASE-8.01.02.5459-260807-08242024-R`
 
-Other official HyperOS 4 launcher builds require a separately verified native profile. Modified official ROMs and ported/custom ROMs are not supported; report their runtime or gesture differences to the ROM maintainer.
+Official HyperOS 4 launcher updates are matched by validated native behavior structure rather than a version whitelist. Modified official ROMs and ported/custom ROMs are outside this project's support and issue-triage boundary; report their runtime or gesture differences to the ROM maintainer.
 
 ## Requirements
 
@@ -91,13 +91,15 @@ Key log lines:
 
 - `native entry initialized in MiuiHome HYOS child` — LSPosed loaded the APK native entry.
 - `installed HYOS hook-page guard` — runtime page cleanup protection is active.
-- `MiuiHome 5361 HYOS runtime hook ready` — the exact launcher profile matched and the hook is active.
-- `kept second pointer on Home recognizer path` — the cancellation decision was bypassed for the gesture.
-- `unsupported MiuiHome native profile; no hook` — the launcher build did not match and was left unchanged.
+- `MiuiHome gesture structure matched; hook ready` — the unique launcher behavior structure matched and the hook is active.
+- `captured second pointer for Home handoff` — the internal single-pointer projection started.
+- `started smooth Home handoff glide` / `finished smooth Home handoff glide` — the frame-driven 180 ms handoff ran to completion.
+- `dropped Home drag from second pointer` — the final stable-frame `UP` was delivered.
+- `MiuiHome gesture structure missing or ambiguous; no hook` — structural validation failed and the launcher was left unchanged.
 
-## Native profiles
+## Compatibility matching
 
-Native offsets and immutable fingerprints live in `smallwindow_native.cpp`. A new official MiuiHome build must be analyzed and validated separately. Do not copy offsets from a nearby version or relax profile matching for modified/ported ROMs.
+The runtime does not contain a MiuiHome version whitelist or per-version fixed offsets. It resolves required imported MotionEvent entry points and validates the surrounding AArch64 control-flow and data-access structure. Exactly one complete candidate is required; missing or ambiguous matches fail closed. Official launcher updates can therefore continue to work when the validated behavior structure is preserved, while changed structures require analysis before the matcher is updated.
 
 ## Project layout
 
@@ -144,8 +146,8 @@ and notices are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 1. 拇指从屏幕底部上滑进入多任务并按住不放；
 2. 食指按住屏幕上任意位置（此时画面不发生变化）；
-3. 松开拇指——窗口被“拖拽”到食指位置；
-4. 松开食指——窗口在该位置挂成小窗。
+3. 松开拇指——窗口在 180 ms 内平滑移动到食指位置；
+4. 可继续移动食指调整位置，松开食指后窗口在该位置挂成小窗。
 
 HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖拽，窗口弹回前台应用。本模块恢复桌面原生的双指处理路径。
 
@@ -153,23 +155,23 @@ HyperOS 4 上这个手势被破坏：第二根手指按下会取消多任务拖�
 
 - HyperOS 4 桌面（`com.miui.home`）是由 `/system_ext/bin/hyos_spawner` 孵化的原生 HYOS 应用，不运行在 ART 上。
 - Zygisk Next 1.5.0+ 提供 HYOS 应用 specialize 生命周期；LSPosed IT 2.1.1+ 利用该能力，按 `com.miui.home` 作用域将本 APK 的 `native_init.list` 入口加载到桌面进程。
-- arm64 payload 在执行任何修改前会校验进程身份、桌面镜像、入口地址和取消路径指纹。
-- MiuiHome 5361 在一个局部判定中把第二指解释为 `MOVE`，不再触发取消；真实多指事件不变，仍交给后续 Launcher / Flutter 多任务路径完成原有的换指、移动和挂小窗行为。
-- HYOS 可能重新映射 APK 内的运行时代码页。模块会保护 PLT hook 页，并在不固定 `hyos_spawner` Build ID 的前提下适配运行时重映射。
-- 桌面布局不受支持或匹配不唯一时，模块会失败关闭，完全保留小米原行为。
+- arm64 payload 在执行任何修改前会校验进程与桌面镜像，解析导入的 MotionEvent API，并扫描 AArch64 可执行代码，要求手势分发结构唯一且完整匹配。
+- 在匹配到的桌面内部边界中，物理双指输入会投影成连续的单指拖拽流，保留拇指的 pointer ID 与 down time。拇指松开后，模块通过 Choreographer 逐帧执行 180 ms 三次缓出动画，并实时跟随食指目标位置。
+- 食指提前松开时会等待动画完成；目标位置至少稳定一个 16 ms 帧后才发送最终 `UP`。取消或新手势会使待执行的帧回调失效并结束当前合成输入流。
+- HYOS 可能丢弃 APK 映射的运行时代码页。模块会保护 hook 页不受 `MADV_DONTNEED` 影响，且不固定 `hyos_spawner` Build ID 或 MiuiHome 版本。
+- 桌面结构缺失或匹配不唯一时，模块会失败关闭，完全保留小米原行为。
 
 Native runtime 架构参考 [MiuiBackGestureHook](https://github.com/wxxsfxyzm/MiuiBackGestureHook) 的最新实现。
 
 ## 兼容性
 
-已验证目标 profile：
+已验证的官方配置：
 
-- 小米 17 Pro Max（`2509FPN0BC`）
-- HyperOS `OS4.0.0.20.XPBCNXM`，Android 17（SDK 37）
-- MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
-- arm64-v8a
+- 小米 17 Pro Max（`2509FPN0BC`），Android 17（SDK 37），arm64-v8a
+- HyperOS `OS4.0.0.20.XPBCNXM`，MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
+- HyperOS `OS4.0.0.25.XPBCNXM`，MiuiHome `801025459` / `RELEASE-8.01.02.5459-260807-08242024-R`
 
-其他官方 HyperOS 4 桌面版本需要单独分析并验证 native profile。**不支持官改包、移植包及其他第三方修改系统；这类系统的问题请向对应系统维护者反馈。**
+官方 HyperOS 4 桌面更新通过已验证的 native 行为结构匹配，不使用版本白名单。**官改包、移植包及其他第三方修改系统不在本项目的支持和问题受理范围内；这类系统的问题请向对应系统维护者反馈。**
 
 ## 要求
 
@@ -223,13 +225,15 @@ adb logcat -s SmallWindowNative:I
 
 - `native entry initialized in MiuiHome HYOS child` —— LSPosed 已加载 APK native entry；
 - `installed HYOS hook-page guard` —— 运行时代码页清理保护已启用；
-- `MiuiHome 5361 HYOS runtime hook ready` —— 桌面 profile 精确匹配且 hook 已生效；
-- `kept second pointer on Home recognizer path` —— 已绕过本次第二指取消判定；
-- `unsupported MiuiHome native profile; no hook` —— 桌面版本不匹配，未修改系统行为。
+- `MiuiHome gesture structure matched; hook ready` —— 唯一的桌面行为结构匹配成功，hook 已生效；
+- `captured second pointer for Home handoff` —— 内部单指投影已开始；
+- `started smooth Home handoff glide` / `finished smooth Home handoff glide` —— 逐帧 180 ms 换指动画已完整执行；
+- `dropped Home drag from second pointer` —— 稳定帧后的最终 `UP` 已发送；
+- `MiuiHome gesture structure missing or ambiguous; no hook` —— 结构校验失败，未修改桌面行为。
 
-## Native profile
+## 兼容性匹配
 
-Native 偏移和不可变指纹位于 `smallwindow_native.cpp`。新的官方 MiuiHome 版本必须单独分析验证；不要复制相近版本偏移，也不要为了兼容官改或移植包而放宽匹配。
+运行时不包含 MiuiHome 版本白名单或按版本固定的偏移。模块解析所需的 MotionEvent 导入入口，并验证周围的 AArch64 控制流和数据访问结构；只有完整候选恰好唯一时才安装 hook，缺失或歧义都会失败关闭。因此，只要已验证的行为结构保持不变，官方桌面更新可以继续兼容；结构发生变化时则需要先完成分析再更新匹配器。
 
 ## 项目结构
 

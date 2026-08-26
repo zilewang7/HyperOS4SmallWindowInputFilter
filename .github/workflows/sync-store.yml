@@ -3,6 +3,14 @@ name: sync-store
 on:
   release:
     types: [published]
+  # Releases created with GITHUB_TOKEN do not emit another workflow event.
+  workflow_run:
+    workflows: [release]
+    types: [completed]
+  # Maintainer-only recovery path for retrying a store sync by branch push.
+  push:
+    branches:
+      - 'store-sync/**'
   workflow_dispatch:
     inputs:
       ref:
@@ -15,12 +23,38 @@ permissions:
 
 jobs:
   sync:
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve source ref
+        id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REQUESTED_REF: ${{ github.event.inputs.ref }}
+          WORKFLOW_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [ "$EVENT_NAME" = "release" ]; then
+            REF="$RELEASE_TAG"
+          elif [ "$EVENT_NAME" = "workflow_run" ]; then
+            REF="$WORKFLOW_HEAD_BRANCH"
+          elif [ -n "$REQUESTED_REF" ]; then
+            REF="$REQUESTED_REF"
+          elif [[ "${GITHUB_REF_NAME}" == store-sync/* ]]; then
+            REF="${GITHUB_REF_NAME#store-sync/}"
+          else
+            REF="$GITHUB_REF_NAME"
+          fi
+          if [[ "$REF" != v* ]]; then
+            echo "Ref must be a release tag such as v1.2.0, got: $REF" >&2
+            exit 1
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name || github.event.inputs.ref || '' }}
+          ref: ${{ steps.source.outputs.ref }}
           fetch-depth: 1
 
       - name: Set up JDK 17
@@ -65,10 +99,12 @@ jobs:
       - name: Sync release to Xposed-Modules-Repo
         env:
           TOKEN: ${{ secrets.STORE_REPO_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
           STORE_REPO: Xposed-Modules-Repo/io.github.zilewang7.smallwindow
+          SOURCE_REPO: ${{ github.repository }}
+          SOURCE_REF: ${{ steps.source.outputs.ref }}
           VERCODE: ${{ steps.meta.outputs.vercode }}
           VERNAME: ${{ steps.meta.outputs.vername }}
-          RELEASE_BODY: ${{ github.event.release.body }}
         run: |
           set -euo pipefail
           APK=$(ls app/build/outputs/apk/release/*.apk | head -1)
@@ -79,6 +115,11 @@ jobs:
           API="https://api.github.com/repos/${STORE_REPO}"
           AUTH="Authorization: Bearer ${TOKEN}"
           ACCEPT="Accept: application/vnd.github+json"
+          RELEASE_BODY=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "$ACCEPT" \
+            "https://api.github.com/repos/${SOURCE_REPO}/releases/tags/${SOURCE_REF}" |
+            python3 -c "import sys,json; print(json.load(sys.stdin).get('body') or 'Automated sync from source repository.')")
+          export RELEASE_BODY
 
           # Reuse an existing release if one with this tag already exists
           EXISTING=$(curl -sS -H "$AUTH" -H "$ACCEPT" "$API/releases/tags/${TAG}" || true)

@@ -802,6 +802,11 @@ bool DecodeMovXToX0(uint32_t instruction, uint32_t* source) {
     return *source != 31u;
 }
 
+bool IsMovW(uint32_t instruction, uint32_t destination, uint32_t source) {
+    return destination < 32u && source < 32u &&
+            instruction == (0x2a0003e0u | (source << 16) | destination);
+}
+
 bool DecodeMovWFromW0(uint32_t instruction, uint32_t* destination) {
     if (destination == nullptr ||
             (instruction & 0xffffffe0u) != 0x2a0003e0u) {
@@ -809,6 +814,30 @@ bool DecodeMovWFromW0(uint32_t instruction, uint32_t* destination) {
     }
     *destination = instruction & 0x1fu;
     return *destination != 31u;
+}
+
+bool DecodeLdrWImmediate(uint32_t instruction, uint32_t* destination,
+                         uint32_t* base, uint32_t* offset) {
+    if (destination == nullptr || base == nullptr || offset == nullptr ||
+            (instruction & 0xffc00000u) != 0xb9400000u) {
+        return false;
+    }
+    *destination = instruction & 0x1fu;
+    *base = (instruction >> 5) & 0x1fu;
+    *offset = ((instruction >> 10) & 0xfffu) * sizeof(uint32_t);
+    return *destination != 31u && *base != 31u;
+}
+
+bool DecodeLdrXImmediate(uint32_t instruction, uint32_t* destination,
+                         uint32_t* base, uint32_t* offset) {
+    if (destination == nullptr || base == nullptr || offset == nullptr ||
+            (instruction & 0xffc00000u) != 0xf9400000u) {
+        return false;
+    }
+    *destination = instruction & 0x1fu;
+    *base = (instruction >> 5) & 0x1fu;
+    *offset = ((instruction >> 10) & 0xfffu) * sizeof(uint64_t);
+    return *destination != 31u && *base != 31u;
 }
 
 bool IsCmpWImmediate(uint32_t instruction, uint32_t source,
@@ -852,37 +881,108 @@ bool HasCoordinateArguments(const Image& image, uintptr_t call,
     return false;
 }
 
+bool FindX0SourceBeforeCall(const Image& image, uintptr_t call,
+                            uint32_t* source) {
+    if (source == nullptr) return false;
+    for (size_t distance = 1u; distance <= 4u; ++distance) {
+        const size_t bytes = distance * sizeof(uint32_t);
+        if (call < bytes) break;
+        uint32_t instruction = 0u;
+        if (ReadInstruction(image, call - bytes, &instruction) &&
+                DecodeMovXToX0(instruction, source)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct ActionCapture {
+    uintptr_t address;
+    uint32_t event_register;
+    uint32_t action_register;
+    bool requires_previous_gate;
+};
+
+bool LocateActionCapture(const Image& image, uintptr_t action_call,
+                         const PltEntries& action_entries,
+                         ActionCapture* output) {
+    if (output == nullptr || action_call < 4u) return false;
+    uint32_t call = 0u;
+    uint32_t compare = 0u;
+    uint32_t branch = 0u;
+    ActionCapture capture{};
+    if (!FindX0SourceBeforeCall(image, action_call,
+                                &capture.event_register) ||
+            !ReadInstruction(image, action_call, &call) ||
+            !IsCallTo(call, action_call, action_entries) ||
+            !ReadInstruction(image, action_call + 4u, &compare) ||
+            !ReadInstruction(image, action_call + 8u, &branch)) {
+        return false;
+    }
+
+    uint32_t capture_instruction = 0u;
+    if (IsCmpWImmediate(compare, 0u, 13u) &&
+            IsConditionalBranch(branch, 2u) &&
+            ReadInstruction(image, action_call + 12u,
+                            &capture_instruction) &&
+            DecodeMovWFromW0(capture_instruction,
+                             &capture.action_register)) {
+        capture.address = action_call + 12u;
+        capture.requires_previous_gate = true;
+        *output = capture;
+        return true;
+    }
+
+    uint32_t condition = 0u;
+    if (IsCmpWImmediate(compare, 0u, 13u) &&
+            IsConditionalBranch(branch, 3u)) {
+        condition = 3u;
+    } else if (IsCmpWImmediate(compare, 0u, 12u) &&
+            IsConditionalBranch(branch, 9u)) {
+        condition = 9u;
+    } else {
+        return false;
+    }
+
+    uintptr_t branch_target = 0u;
+    if (!DecodeConditionalBranchTarget(branch, action_call + 8u,
+                                       condition, &branch_target) ||
+            branch_target <= action_call + 8u ||
+            branch_target - action_call >
+                    kPrimaryActionSearchInstructions * sizeof(uint32_t) ||
+            !ReadInstruction(image, branch_target, &capture_instruction) ||
+            !DecodeMovWFromW0(capture_instruction,
+                              &capture.action_register)) {
+        return false;
+    }
+    capture.address = branch_target;
+    capture.requires_previous_gate = false;
+    *output = capture;
+    return true;
+}
+
 bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
                               const PltEntries& action_entries,
                               const PltEntries& raw_x_entries,
                               const PltEntries& raw_y_entries,
                               const PltEntries& clone_entries,
                               const PltEntries& set_action_entries,
-                              uintptr_t* cancel_set_call) {
-    if (cancel_set_call == nullptr) return false;
+                              uintptr_t* cancel_set_call,
+                              ActionCapture* action_capture) {
+    if (cancel_set_call == nullptr || action_capture == nullptr) return false;
     uint32_t instruction = 0u;
-    uint32_t event_register = 0u;
-    uint32_t action_register = 0u;
-    if (action_call < 4u ||
-            !ReadInstruction(image, action_call - 4u, &instruction) ||
-            !DecodeMovXToX0(instruction, &event_register) ||
-            !ReadInstruction(image, action_call, &instruction) ||
-            !IsCallTo(instruction, action_call, action_entries) ||
-            !ReadInstruction(image, action_call + 4u, &instruction) ||
-            !IsCmpWImmediate(instruction, 0u, 13u) ||
-            !ReadInstruction(image, action_call + 8u, &instruction) ||
-            !IsConditionalBranch(instruction, 2u) ||
-            !ReadInstruction(image, action_call + 12u, &instruction) ||
-            !DecodeMovWFromW0(instruction, &action_register)) {
+    ActionCapture capture{};
+    if (!LocateActionCapture(image, action_call, action_entries, &capture)) {
         return false;
     }
 
     uintptr_t raw_x_call = 0u;
-    for (size_t i = 4u; i <= kActionSearchInstructions; ++i) {
-        const uintptr_t candidate = action_call + i * 4u;
+    for (size_t i = 1u; i <= kActionSearchInstructions; ++i) {
+        const uintptr_t candidate = capture.address + i * 4u;
         if (ReadInstruction(image, candidate, &instruction) &&
                 IsCallTo(instruction, candidate, raw_x_entries) &&
-                HasCoordinateArguments(image, candidate, event_register)) {
+                HasCoordinateArguments(image, candidate,
+                                       capture.event_register)) {
             raw_x_call = candidate;
             break;
         }
@@ -894,7 +994,8 @@ bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
         const uintptr_t candidate = raw_x_call + i * 4u;
         if (ReadInstruction(image, candidate, &instruction) &&
                 IsCallTo(instruction, candidate, raw_y_entries) &&
-                HasCoordinateArguments(image, candidate, event_register)) {
+                HasCoordinateArguments(image, candidate,
+                                       capture.event_register)) {
             raw_y_call = candidate;
             break;
         }
@@ -904,7 +1005,7 @@ bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
     bool action_move_check = false;
     for (size_t i = 1u; i <= 4u; ++i) {
         if (ReadInstruction(image, raw_y_call + i * 4u, &instruction) &&
-                IsCmpWImmediate(instruction, action_register, 2u)) {
+                IsCmpWImmediate(instruction, capture.action_register, 2u)) {
             action_move_check = true;
             break;
         }
@@ -915,7 +1016,7 @@ bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
         const uintptr_t pointer_check = raw_y_call + i * 4u;
         uint32_t branch = 0u;
         if (!ReadInstruction(image, pointer_check, &instruction) ||
-                !IsCmpWImmediate(instruction, action_register, 5u) ||
+                !IsCmpWImmediate(instruction, capture.action_register, 5u) ||
                 !ReadInstruction(image, pointer_check + 4u, &branch) ||
                 !IsConditionalBranch(branch, 1u)) {
             continue;
@@ -939,6 +1040,7 @@ bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
                                         &argument) &&
                             argument == 0x52800061u) {
                         *cancel_set_call = set_call;
+                        *action_capture = capture;
                         return true;
                     }
                 }
@@ -953,13 +1055,19 @@ bool LocatePrimaryActionDecision(const Image& image,
                                  const PltEntries& action_entries,
                                  uintptr_t* output) {
     if (output == nullptr || secondary_action_call < 4u) return false;
-    uint32_t instruction = 0u;
-    uint32_t event_register = 0u;
-    if (!ReadInstruction(image, secondary_action_call - 4u, &instruction) ||
-            !DecodeMovXToX0(instruction, &event_register)) {
+    ActionCapture capture{};
+    if (!LocateActionCapture(image, secondary_action_call, action_entries,
+                             &capture)) {
         return false;
     }
-    const uintptr_t expected_branch_target = secondary_action_call + 12u;
+    if (!capture.requires_previous_gate) {
+        *output = capture.address;
+        return true;
+    }
+
+    uint32_t instruction = 0u;
+    const uint32_t event_register = capture.event_register;
+    const uintptr_t expected_branch_target = capture.address;
     uintptr_t match = 0u;
     size_t match_count = 0u;
     for (size_t distance = 1u;
@@ -992,36 +1100,92 @@ bool LocatePrimaryActionDecision(const Image& image,
     return true;
 }
 
+bool ValidateDispatchSetup(const Image& image, uintptr_t start,
+                           uintptr_t action_call,
+                           const ActionCapture& capture,
+                           uint32_t state_register) {
+    if (start >= action_call || capture.event_register < 19u ||
+            capture.event_register > 28u || state_register < 19u ||
+            state_register > 28u) {
+        return false;
+    }
+    uint32_t stack_setup = 0u;
+    if (!ReadInstruction(image, start, &stack_setup) ||
+            (stack_setup & 0xffc003ffu) != 0xd10003ffu) {
+        return false;
+    }
+    const uint32_t stack_size = (stack_setup >> 10) & 0xfffu;
+    if (stack_size < 64u) return false;
+
+    bool saved_frame = false;
+    bool established_frame = false;
+    bool loaded_inner = false;
+    bool saved_event = false;
+    bool saved_state = false;
+    bool saved_status = false;
+    uint32_t frame_offset = 0u;
+    const size_t instruction_count =
+            static_cast<size_t>((action_call - start) / sizeof(uint32_t));
+    for (size_t i = 1u; i < instruction_count; ++i) {
+        uint32_t instruction = 0u;
+        if (!ReadInstruction(image, start + i * sizeof(uint32_t),
+                             &instruction) ||
+                (instruction & 0xfffffc1fu) == 0xd65f0000u) {
+            return false;
+        }
+        if ((instruction & 0xffc07fffu) == 0xa9007bfdu) {
+            const uint32_t offset =
+                    ((instruction >> 15) & 0x7fu) * sizeof(uint64_t);
+            if (offset + 2u * sizeof(uint64_t) <= stack_size) {
+                saved_frame = true;
+                frame_offset = offset;
+            }
+        }
+        if ((instruction & 0xffc003ffu) == 0x910003fdu &&
+                ((instruction >> 10) & 0xfffu) == frame_offset) {
+            established_frame = true;
+        }
+        uint32_t destination = 0u;
+        uint32_t base = 0u;
+        uint32_t offset = 0u;
+        if (DecodeLdrXImmediate(instruction, &destination, &base, &offset) &&
+                destination == 8u && base == 0u && offset >= 0x200u &&
+                offset <= 0x300u) {
+            loaded_inner = true;
+        }
+        saved_event = saved_event ||
+                IsMovX(instruction, capture.event_register, 1u);
+        saved_state = saved_state || IsMovX(instruction, state_register, 2u);
+        for (uint32_t register_index = 19u;
+             register_index <= 28u && !saved_status; ++register_index) {
+            saved_status = IsMovW(instruction, register_index, 3u);
+        }
+    }
+    return saved_frame && established_frame && loaded_inner &&
+            saved_event && saved_state && saved_status;
+}
+
 bool FindDispatchStart(const Image& image, uintptr_t action_call,
-                       uintptr_t* output) {
+                       const ActionCapture& capture,
+                       uint32_t state_register, uintptr_t* output) {
     if (output == nullptr) return false;
-    constexpr uint32_t prologue[] = {
-            0xd10703ffu, 0xfd00a3eau, 0x6d1523e9u, 0xa9167bfdu,
-            0xa9176ffcu, 0xa91867fau, 0xa9195ff8u, 0xa91a57f6u,
-            0xa91b4ff4u, 0x910583fdu,
-    };
     uintptr_t match = 0u;
     size_t match_count = 0u;
     for (size_t distance = 1u;
          distance <= kFunctionStartSearchInstructions; ++distance) {
         const size_t bytes = distance * sizeof(uint32_t);
         if (action_call < bytes) break;
-        const uintptr_t candidate = action_call - bytes;
-        bool valid = true;
-        for (size_t i = 0u; i < sizeof(prologue) / sizeof(prologue[0]); ++i) {
-            uint32_t instruction = 0u;
-            if (!ReadInstruction(image, candidate + i * 4u, &instruction) ||
-                    instruction != prologue[i]) {
-                valid = false;
-                break;
-            }
-        }
-        uint32_t object_load = 0u;
-        if (!valid ||
-                !ReadInstruction(image, candidate + sizeof(prologue),
-                                 &object_load) ||
-                (object_load & 0xffc003ffu) != 0xf9400008u) {
+        uintptr_t candidate = action_call - bytes;
+        if (!ValidateDispatchSetup(image, candidate, action_call, capture,
+                                   state_register)) {
             continue;
+        }
+        uint32_t prefix = 0u;
+        if (candidate >= sizeof(uint32_t) &&
+                ReadInstruction(image, candidate - sizeof(uint32_t),
+                                &prefix) &&
+                prefix == 0xd503245fu) {
+            candidate -= sizeof(uint32_t);
         }
         match = candidate;
         ++match_count;
@@ -1033,9 +1197,10 @@ bool FindDispatchStart(const Image& image, uintptr_t action_call,
 }
 
 bool DecodeGestureTypeOffset(const Image& image, uintptr_t cancel_set_call,
-                             uint32_t* output) {
-    if (output == nullptr) return false;
-    uint32_t match = 0u;
+                             uint32_t* output, uint32_t* state_register) {
+    if (output == nullptr || state_register == nullptr) return false;
+    uint32_t matched_offset = 0u;
+    uint32_t matched_register = 0u;
     size_t match_count = 0u;
     for (size_t distance = 1u;
          distance <= kFunctionSetupInstructions; ++distance) {
@@ -1044,18 +1209,25 @@ bool DecodeGestureTypeOffset(const Image& image, uintptr_t cancel_set_call,
         const uintptr_t candidate = cancel_set_call - bytes;
         uint32_t load = 0u;
         uint32_t compare = 0u;
+        uint32_t destination = 0u;
+        uint32_t base = 0u;
+        uint32_t offset = 0u;
         if (!ReadInstruction(image, candidate, &load) ||
-                (load & 0xffc003ffu) != 0xb9400288u ||
-                !ReadInstruction(image, candidate + 4u, &compare) ||
-                !IsCmpWImmediate(compare, 8u, 1u)) {
+                !DecodeLdrWImmediate(load, &destination, &base, &offset) ||
+                !ReadInstruction(image, candidate + sizeof(uint32_t),
+                                 &compare) ||
+                !IsCmpWImmediate(compare, destination, 1u) ||
+                offset > 0x1000u) {
             continue;
         }
-        match = ((load >> 10) & 0xfffu) * sizeof(uint32_t);
+        matched_offset = offset;
+        matched_register = base;
         ++match_count;
         if (match_count > 1u) return false;
     }
-    if (match_count != 1u || match > 0x1000u) return false;
-    *output = match;
+    if (match_count != 1u) return false;
+    *output = matched_offset;
+    *state_register = matched_register;
     return true;
 }
 
@@ -1093,24 +1265,33 @@ bool LocateGestureStructure(const Image& launcher, GestureStructure* output) {
             uint32_t instruction = 0u;
             uintptr_t cancel_set_call = 0u;
             uintptr_t primary_decision = 0u;
+            uint32_t state_register = 0u;
+            ActionCapture action_capture{};
             GestureStructure candidate{};
             if (ReadInstruction(launcher, cursor, &instruction) &&
                     IsCallTo(instruction, cursor, action_entries) &&
                     ValidateGestureCandidate(
                             launcher, cursor, action_entries, raw_x_entries,
                             raw_y_entries, clone_entries, set_action_entries,
-                            &cancel_set_call) &&
+                            &cancel_set_call, &action_capture) &&
                     LocatePrimaryActionDecision(
                             launcher, cursor, action_entries,
                             &primary_decision) &&
-                    FindDispatchStart(launcher, cursor,
-                                      &candidate.dispatch) &&
                     DecodeGestureTypeOffset(
                             launcher, cancel_set_call,
-                            &candidate.gesture_type_offset)) {
-                match = candidate;
-                ++match_count;
-                if (match_count > 1u) return false;
+                            &candidate.gesture_type_offset,
+                            &state_register) &&
+                    FindDispatchStart(
+                            launcher, cursor, action_capture,
+                            state_register, &candidate.dispatch)) {
+                if (match_count == 0u) {
+                    match = candidate;
+                    match_count = 1u;
+                } else if (candidate.dispatch != match.dispatch ||
+                        candidate.gesture_type_offset !=
+                                match.gesture_type_offset) {
+                    return false;
+                }
             }
             cursor += 4u;
         }

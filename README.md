@@ -36,6 +36,7 @@ Validated official configurations:
 - Xiaomi 17 Pro Max (`2509FPN0BC`), Android 17 (SDK 37), arm64-v8a
 - HyperOS `OS4.0.0.20.XPBCNXM` with MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
 - HyperOS `OS4.0.0.25.XPBCNXM` with MiuiHome `801025459` / `RELEASE-8.01.02.5459-260807-08242024-R`
+- HyperOS `OS4.0.0.35.XPBCNXM` with MiuiHome `801026241` / `RELEASE-8.01.02.6241-260818-09051525-R`
 
 Official HyperOS 4 launcher updates are matched by validated native behavior structure rather than a version whitelist. Modified official ROMs and ported/custom ROMs are outside this project's support and issue-triage boundary; report their runtime or gesture differences to the ROM maintainer.
 
@@ -60,7 +61,7 @@ Requirements:
 ./gradlew :app:assembleDiag --no-daemon         # diagnostics (native file logging enabled)
 ```
 
-Artifacts follow the `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `io.github.zilewang7.smallwindow-1.2.0.apk` (release), `io.github.zilewang7.smallwindow-1.2.0_debug.apk` (debug) and `io.github.zilewang7.smallwindow-1.2.0_debug_diag.apk` (diagnostics). The release build has no type suffix, so it sorts first in GitHub's alphabetical asset listing.
+Artifacts follow the `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `io.github.zilewang7.smallwindow-1.2.1.apk` (release), `io.github.zilewang7.smallwindow-1.2.1_debug.apk` (debug) and `io.github.zilewang7.smallwindow-1.2.1_debug_diag.apk` (diagnostics). The release build has no type suffix, so it sorts first in GitHub's alphabetical asset listing.
 
 GitHub Actions builds the debug artifact on every push, and pushing a `v*` tag creates a GitHub Release carrying the signed release APK (`io.github.zilewang7.smallwindow-*.apk`) and the diagnostics APK (`io.github.zilewang7.smallwindow-*_debug_diag.apk`) (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
 
@@ -170,6 +171,7 @@ Native runtime 架构参考 [MiuiBackGestureHook](https://github.com/wxxsfxyzm/M
 - 小米 17 Pro Max（`2509FPN0BC`），Android 17（SDK 37），arm64-v8a
 - HyperOS `OS4.0.0.20.XPBCNXM`，MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
 - HyperOS `OS4.0.0.25.XPBCNXM`，MiuiHome `801025459` / `RELEASE-8.01.02.5459-260807-08242024-R`
+- HyperOS `OS4.0.0.35.XPBCNXM`，MiuiHome `801026241` / `RELEASE-8.01.02.6241-260818-09051525-R`
 
 官方 HyperOS 4 桌面更新通过已验证的 native 行为结构匹配，不使用版本白名单。**官改包、移植包及其他第三方修改系统不在本项目的支持和问题受理范围内；这类系统的问题请向对应系统维护者反馈。**
 
@@ -194,7 +196,7 @@ Native runtime 架构参考 [MiuiBackGestureHook](https://github.com/wxxsfxyzm/M
 ./gradlew :app:assembleDiag --no-daemon         # 诊断版（开启 native 文件日志）
 ```
 
-产物命名遵循 `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk`，例如 `io.github.zilewang7.smallwindow-1.2.0.apk`（正式版）、`io.github.zilewang7.smallwindow-1.2.0_debug.apk`（debug）和 `io.github.zilewang7.smallwindow-1.2.0_debug_diag.apk`（诊断版）。正式版不带类型后缀，在 GitHub 的字母序附件列表中会排在最前。
+产物命名遵循 `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk`，例如 `io.github.zilewang7.smallwindow-1.2.1.apk`（正式版）、`io.github.zilewang7.smallwindow-1.2.1_debug.apk`（debug）和 `io.github.zilewang7.smallwindow-1.2.1_debug_diag.apk`（诊断版）。正式版不带类型后缀，在 GitHub 的字母序附件列表中会排在最前。
 
 GitHub Actions 会在每次 push 时构建 debug 产物；推送 `v*` 标签时，会自动创建同时附带签名正式版 APK（`io.github.zilewang7.smallwindow-*.apk`）与诊断版 APK（`io.github.zilewang7.smallwindow-*_debug_diag.apk`）的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
 

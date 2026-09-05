@@ -1,7 +1,7 @@
 id=io.github.zilewang7.smallwindow
 name=HyperOS4 SmallWindow Input Filter
-version=1.2.0
-versionCode=4
+version=1.2.1
+versionCode=5
 author=zilewang7
 description=Restore the old HyperOS two-finger small-window gesture through the MiuiHome HYOS runtime.
 minApiVersion=102

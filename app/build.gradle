@@ -15,8 +15,8 @@ android {
         applicationId "io.github.zilewang7.smallwindow"
         minSdk 36
         targetSdk 37
-        versionCode 5
-        versionName "1.2.1"
+        versionCode 6
+        versionName "1.2.2"
 
         ndk {
             abiFilters "arm64-v8a"
@@ -109,9 +109,9 @@ dependencies {
 // Artifact naming convention: <applicationId>-<versionName>[_debug[_diag]].apk
 // The release build has no type suffix, so it sorts FIRST in GitHub's
 // alphabetical asset listing ('.' < '_'), with debug/diag below it.
-//   io.github.zilewang7.smallwindow-1.2.1.apk
-//   io.github.zilewang7.smallwindow-1.2.1_debug.apk
-//   io.github.zilewang7.smallwindow-1.2.1_debug_diag.apk
+//   io.github.zilewang7.smallwindow-1.2.2.apk
+//   io.github.zilewang7.smallwindow-1.2.2_debug.apk
+//   io.github.zilewang7.smallwindow-1.2.2_debug_diag.apk
 androidComponents {
     onVariants(selector().all()) { variant ->
         variant.outputs.forEach { output ->

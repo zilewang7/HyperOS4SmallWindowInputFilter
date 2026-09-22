@@ -37,6 +37,7 @@ Validated official configurations:
 - HyperOS `OS4.0.0.20.XPBCNXM` with MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
 - HyperOS `OS4.0.0.25.XPBCNXM` with MiuiHome `801025459` / `RELEASE-8.01.02.5459-260807-08242024-R`
 - HyperOS `OS4.0.0.35.XPBCNXM` with MiuiHome `801026241` / `RELEASE-8.01.02.6241-260818-09051525-R`
+- HyperOS `OS4.0.0.40.XPBCNXM` with MiuiHome `801027719` / `RELEASE-8.01.02.7719-260904-09181618-R`
 
 Official HyperOS 4 launcher updates are matched by validated native behavior structure rather than a version whitelist. Modified official ROMs and ported/custom ROMs are outside this project's support and issue-triage boundary; report their runtime or gesture differences to the ROM maintainer.
 
@@ -61,7 +62,7 @@ Requirements:
 ./gradlew :app:assembleDiag --no-daemon         # diagnostics (native file logging enabled)
 ```
 
-Artifacts follow the `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `io.github.zilewang7.smallwindow-1.2.1.apk` (release), `io.github.zilewang7.smallwindow-1.2.1_debug.apk` (debug) and `io.github.zilewang7.smallwindow-1.2.1_debug_diag.apk` (diagnostics). The release build has no type suffix, so it sorts first in GitHub's alphabetical asset listing.
+Artifacts follow the `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk` naming convention, e.g. `io.github.zilewang7.smallwindow-1.2.2.apk` (release), `io.github.zilewang7.smallwindow-1.2.2_debug.apk` (debug) and `io.github.zilewang7.smallwindow-1.2.2_debug_diag.apk` (diagnostics). The release build has no type suffix, so it sorts first in GitHub's alphabetical asset listing.
 
 GitHub Actions builds the debug artifact on every push, and pushing a `v*` tag creates a GitHub Release carrying the signed release APK (`io.github.zilewang7.smallwindow-*.apk`) and the diagnostics APK (`io.github.zilewang7.smallwindow-*_debug_diag.apk`) (see `.github/workflows/build.yml` and `.github/workflows/release.yml`). A published release is also automatically synced to the official module repository repo `Xposed-Modules-Repo/io.github.zilewang7.smallwindow` with tag `VersionCode-VersionName` (see `.github/workflows/sync-store.yml`).
 
@@ -100,7 +101,7 @@ Key log lines:
 
 ## Compatibility matching
 
-The runtime does not contain a MiuiHome version whitelist or per-version fixed offsets. It resolves required imported MotionEvent entry points and validates the surrounding AArch64 control-flow and data-access structure. Exactly one complete candidate is required; missing or ambiguous matches fail closed. Official launcher updates can therefore continue to work when the validated behavior structure is preserved, while changed structures require analysis before the matcher is updated.
+The runtime does not contain a MiuiHome version whitelist or per-version fixed offsets. It resolves required imported MotionEvent entry points and validates the surrounding AArch64 control-flow and data-access structure. Exactly one complete candidate is required; missing or ambiguous matches fail closed. Values that move between releases — the gesture state field, the object substituted when the launcher passes a null state, and whether the drag-cancel body is inlined or outlined into a helper — are decoded from the matched structure instead of being hardcoded. Official launcher updates can therefore continue to work when the validated behavior structure is preserved, while changed structures require analysis before the matcher is updated.
 
 ## Project layout
 
@@ -172,6 +173,7 @@ Native runtime 架构参考 [MiuiBackGestureHook](https://github.com/wxxsfxyzm/M
 - HyperOS `OS4.0.0.20.XPBCNXM`，MiuiHome `801025361` / `RELEASE-8.01.02.5361-260807-08161657-R`
 - HyperOS `OS4.0.0.25.XPBCNXM`，MiuiHome `801025459` / `RELEASE-8.01.02.5459-260807-08242024-R`
 - HyperOS `OS4.0.0.35.XPBCNXM`，MiuiHome `801026241` / `RELEASE-8.01.02.6241-260818-09051525-R`
+- HyperOS `OS4.0.0.40.XPBCNXM`，MiuiHome `801027719` / `RELEASE-8.01.02.7719-260904-09181618-R`
 
 官方 HyperOS 4 桌面更新通过已验证的 native 行为结构匹配，不使用版本白名单。**官改包、移植包及其他第三方修改系统不在本项目的支持和问题受理范围内；这类系统的问题请向对应系统维护者反馈。**
 
@@ -196,7 +198,7 @@ Native runtime 架构参考 [MiuiBackGestureHook](https://github.com/wxxsfxyzm/M
 ./gradlew :app:assembleDiag --no-daemon         # 诊断版（开启 native 文件日志）
 ```
 
-产物命名遵循 `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk`，例如 `io.github.zilewang7.smallwindow-1.2.1.apk`（正式版）、`io.github.zilewang7.smallwindow-1.2.1_debug.apk`（debug）和 `io.github.zilewang7.smallwindow-1.2.1_debug_diag.apk`（诊断版）。正式版不带类型后缀，在 GitHub 的字母序附件列表中会排在最前。
+产物命名遵循 `io.github.zilewang7.smallwindow-<versionName>[_debug[_diag]].apk`，例如 `io.github.zilewang7.smallwindow-1.2.2.apk`（正式版）、`io.github.zilewang7.smallwindow-1.2.2_debug.apk`（debug）和 `io.github.zilewang7.smallwindow-1.2.2_debug_diag.apk`（诊断版）。正式版不带类型后缀，在 GitHub 的字母序附件列表中会排在最前。
 
 GitHub Actions 会在每次 push 时构建 debug 产物；推送 `v*` 标签时，会自动创建同时附带签名正式版 APK（`io.github.zilewang7.smallwindow-*.apk`）与诊断版 APK（`io.github.zilewang7.smallwindow-*_debug_diag.apk`）的 GitHub Release（见 `.github/workflows/build.yml` 和 `.github/workflows/release.yml`）。发布后还会自动同步到官方模块仓库 `Xposed-Modules-Repo/io.github.zilewang7.smallwindow`，使用 `VersionCode-VersionName` 格式的 tag（见 `.github/workflows/sync-store.yml`）。
 
@@ -235,7 +237,7 @@ adb logcat -s SmallWindowNative:I
 
 ## 兼容性匹配
 
-运行时不包含 MiuiHome 版本白名单或按版本固定的偏移。模块解析所需的 MotionEvent 导入入口，并验证周围的 AArch64 控制流和数据访问结构；只有完整候选恰好唯一时才安装 hook，缺失或歧义都会失败关闭。因此，只要已验证的行为结构保持不变，官方桌面更新可以继续兼容；结构发生变化时则需要先完成分析再更新匹配器。
+运行时不包含 MiuiHome 版本白名单或按版本固定的偏移。模块解析所需的 MotionEvent 导入入口，并验证周围的 AArch64 控制流和数据访问结构；只有完整候选恰好唯一时才安装 hook，缺失或歧义都会失败关闭。会在版本之间移动的值——手势状态字段、桌面传入空状态对象时使用的替代对象、以及取消拖拽的代码是内联还是被外提成辅助函数——都从匹配到的结构中推导，而不是写死。因此，只要已验证的行为结构保持不变，官方桌面更新可以继续兼容；结构发生变化时则需要先完成分析再更新匹配器。
 
 ## 项目结构
 

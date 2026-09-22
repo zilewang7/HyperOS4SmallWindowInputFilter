@@ -35,6 +35,9 @@ constexpr size_t kPrimaryActionSearchInstructions = 128u;
 constexpr size_t kPointerDownSearchInstructions = 192u;
 constexpr size_t kFunctionStartSearchInstructions = 256u;
 constexpr size_t kFunctionSetupInstructions = 32u;
+constexpr size_t kCancelSearchInstructions = 64u;
+constexpr size_t kCancelHelperInstructions = 48u;
+constexpr uint32_t kCancelActionImmediate = 0x52800061u;
 constexpr int64_t kTeleportDurationNanos = 180000000;
 constexpr int64_t kMinimumDropHoldNanos = 16000000;
 
@@ -94,6 +97,7 @@ struct HookPlan {
 struct GestureStructure {
     uintptr_t dispatch;
     uint32_t gesture_type_offset;
+    uint32_t state_fallback_offset;
 };
 
 struct ProjectionState {
@@ -137,6 +141,7 @@ MotionNewFn g_motion_new = nullptr;
 int64_t (*g_motion_get_down_time)(void* event) = nullptr;
 int64_t (*g_motion_get_event_time)(void* event) = nullptr;
 uint32_t g_gesture_type_offset = 0u;
+uint32_t g_state_fallback_offset = 0x20u;
 thread_local ProjectionState g_projection{};
 thread_local uintptr_t g_projection_epoch = 1u;
 MadviseFn g_original_madvise = nullptr;
@@ -840,6 +845,23 @@ bool DecodeLdrXImmediate(uint32_t instruction, uint32_t* destination,
     return *destination != 31u && *base != 31u;
 }
 
+bool IsCbnzX(uint32_t instruction, uint32_t reg) {
+    return reg < 32u && (instruction & 0xff000000u) == 0xb5000000u &&
+            (instruction & 0x1fu) == reg;
+}
+
+bool DecodeAddXImmediate(uint32_t instruction, uint32_t* destination,
+                         uint32_t* base, uint32_t* immediate) {
+    if (destination == nullptr || base == nullptr || immediate == nullptr ||
+            (instruction & 0xff800000u) != 0x91000000u) {
+        return false;
+    }
+    *destination = instruction & 0x1fu;
+    *base = (instruction >> 5) & 0x1fu;
+    *immediate = (instruction >> 10) & 0xfffu;
+    return *destination != 31u && *base != 31u;
+}
+
 bool IsCmpWImmediate(uint32_t instruction, uint32_t source,
                      uint32_t immediate) {
     return source < 32u && immediate < 4096u &&
@@ -961,15 +983,103 @@ bool LocateActionCapture(const Image& image, uintptr_t action_call,
     return true;
 }
 
+struct CancelEvidence {
+    uintptr_t anchor;
+    uintptr_t helper_target;
+    bool outlined;
+};
+
+bool HasCancelActionImmediate(const Image& image, uintptr_t set_call,
+                              size_t instructions_before) {
+    for (size_t back = 1u; back <= 3u && back <= instructions_before; ++back) {
+        uint32_t argument = 0u;
+        if (ReadInstruction(image, set_call - back * sizeof(uint32_t),
+                            &argument) &&
+                argument == kCancelActionImmediate) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CancelHelperClones(const Image& image, uintptr_t target,
+                        const PltEntries& clone_entries,
+                        const PltEntries& set_action_entries) {
+    for (size_t i = 0u; i < kCancelHelperInstructions; ++i) {
+        const uintptr_t cursor = target + i * sizeof(uint32_t);
+        uint32_t instruction = 0u;
+        if (!ReadInstruction(image, cursor, &instruction)) return false;
+        if (!IsCallTo(instruction, cursor, clone_entries)) continue;
+        for (size_t k = 1u; k <= 5u; ++k) {
+            const uintptr_t set_call = cursor + k * sizeof(uint32_t);
+            if (!ReadInstruction(image, set_call, &instruction) ||
+                    !IsCallTo(instruction, set_call, set_action_entries)) {
+                continue;
+            }
+            if (HasCancelActionImmediate(image, set_call, k)) return true;
+        }
+    }
+    return false;
+}
+
+// The launcher cancels the active drag once a second pointer goes down. Older
+// builds inline that cancel body; newer builds outline it into a helper, so the
+// evidence is either the inline setAction call or the call site of that helper.
+bool LocateCancelEvidence(const Image& image, uintptr_t pointer_check,
+                          const PltEntries& clone_entries,
+                          const PltEntries& set_action_entries,
+                          CancelEvidence* output) {
+    if (output == nullptr) return false;
+    for (size_t j = 2u; j <= kCancelSearchInstructions; ++j) {
+        const uintptr_t clone_call = pointer_check + j * sizeof(uint32_t);
+        uint32_t instruction = 0u;
+        if (!ReadInstruction(image, clone_call, &instruction) ||
+                !IsCallTo(instruction, clone_call, clone_entries)) {
+            continue;
+        }
+        for (size_t k = 1u; k <= 5u; ++k) {
+            const uintptr_t set_call = clone_call + k * sizeof(uint32_t);
+            if (!ReadInstruction(image, set_call, &instruction) ||
+                    !IsCallTo(instruction, set_call, set_action_entries)) {
+                continue;
+            }
+            if (HasCancelActionImmediate(image, set_call, k)) {
+                output->anchor = set_call;
+                output->helper_target = 0u;
+                output->outlined = false;
+                return true;
+            }
+        }
+    }
+    for (size_t j = 2u; j <= kCancelSearchInstructions; ++j) {
+        const uintptr_t call = pointer_check + j * sizeof(uint32_t);
+        uint32_t instruction = 0u;
+        if (!ReadInstruction(image, call, &instruction)) return false;
+        uintptr_t target = 0u;
+        if (!DecodeBlTarget(instruction, call, &target) ||
+                !RangeInImage(image, target, sizeof(uint32_t), PF_X)) {
+            continue;
+        }
+        if (CancelHelperClones(image, target, clone_entries,
+                               set_action_entries)) {
+            output->anchor = call;
+            output->helper_target = target;
+            output->outlined = true;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
                               const PltEntries& action_entries,
                               const PltEntries& raw_x_entries,
                               const PltEntries& raw_y_entries,
                               const PltEntries& clone_entries,
                               const PltEntries& set_action_entries,
-                              uintptr_t* cancel_set_call,
+                              CancelEvidence* cancel_evidence,
                               ActionCapture* action_capture) {
-    if (cancel_set_call == nullptr || action_capture == nullptr) return false;
+    if (cancel_evidence == nullptr || action_capture == nullptr) return false;
     uint32_t instruction = 0u;
     ActionCapture capture{};
     if (!LocateActionCapture(image, action_call, action_entries, &capture)) {
@@ -1021,31 +1131,14 @@ bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
                 !IsConditionalBranch(branch, 1u)) {
             continue;
         }
-        for (size_t j = 2u; j <= 64u; ++j) {
-            const uintptr_t clone_call = pointer_check + j * 4u;
-            if (!ReadInstruction(image, clone_call, &instruction) ||
-                    !IsCallTo(instruction, clone_call, clone_entries)) {
-                continue;
-            }
-            for (size_t k = 1u; k <= 5u; ++k) {
-                const uintptr_t set_call = clone_call + k * 4u;
-                if (!ReadInstruction(image, set_call, &instruction) ||
-                        !IsCallTo(instruction, set_call,
-                                  set_action_entries)) {
-                    continue;
-                }
-                for (size_t back = 1u; back <= 3u && back <= k; ++back) {
-                    uint32_t argument = 0u;
-                    if (ReadInstruction(image, set_call - back * 4u,
-                                        &argument) &&
-                            argument == 0x52800061u) {
-                        *cancel_set_call = set_call;
-                        *action_capture = capture;
-                        return true;
-                    }
-                }
-            }
+        CancelEvidence evidence{};
+        if (!LocateCancelEvidence(image, pointer_check, clone_entries,
+                                  set_action_entries, &evidence)) {
+            continue;
         }
+        *cancel_evidence = evidence;
+        *action_capture = capture;
+        return true;
     }
     return false;
 }
@@ -1103,7 +1196,8 @@ bool LocatePrimaryActionDecision(const Image& image,
 bool ValidateDispatchSetup(const Image& image, uintptr_t start,
                            uintptr_t action_call,
                            const ActionCapture& capture,
-                           uint32_t state_register) {
+                           uint32_t state_register,
+                           uint32_t* state_fallback) {
     if (start >= action_call || capture.event_register < 19u ||
             capture.event_register > 28u || state_register < 19u ||
             state_register > 28u) {
@@ -1124,6 +1218,8 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
     bool saved_state = false;
     bool saved_status = false;
     uint32_t frame_offset = 0u;
+    uint32_t monitor_register = 0u;
+    uint32_t fallback_offset = 0u;
     const size_t instruction_count =
             static_cast<size_t>((action_call - start) / sizeof(uint32_t));
     for (size_t i = 1u; i < instruction_count; ++i) {
@@ -1150,7 +1246,7 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
         uint32_t offset = 0u;
         if (DecodeLdrXImmediate(instruction, &destination, &base, &offset) &&
                 destination == 8u && base == 0u && offset >= 0x200u &&
-                offset <= 0x300u) {
+                offset <= 0x400u) {
             loaded_inner = true;
         }
         saved_event = saved_event ||
@@ -1160,24 +1256,65 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
              register_index <= 28u && !saved_status; ++register_index) {
             saved_status = IsMovW(instruction, register_index, 3u);
         }
+        if (monitor_register == 0u) {
+            for (uint32_t register_index = 19u; register_index <= 28u;
+                 ++register_index) {
+                if (IsMovX(instruction, register_index, 0u)) {
+                    monitor_register = register_index;
+                    break;
+                }
+            }
+        }
+        // Some launcher builds accept a null state argument and substitute an
+        // object embedded in the monitor instead; that offset moves between
+        // releases, so it is decoded from the guard rather than hardcoded.
+        if (fallback_offset == 0u && monitor_register != 0u &&
+                IsCbnzX(instruction, state_register)) {
+            for (size_t look = 1u; look <= 2u && fallback_offset == 0u;
+                 ++look) {
+                uint32_t next = 0u;
+                uint32_t add_destination = 0u;
+                uint32_t add_base = 0u;
+                uint32_t immediate = 0u;
+                if (ReadInstruction(image,
+                                    start + (i + look) * sizeof(uint32_t),
+                                    &next) &&
+                        DecodeAddXImmediate(next, &add_destination, &add_base,
+                                            &immediate) &&
+                        add_destination == state_register &&
+                        add_base == monitor_register && immediate > 0u &&
+                        immediate <= 0x1000u) {
+                    fallback_offset = immediate;
+                }
+            }
+        }
     }
-    return saved_frame && established_frame && loaded_inner &&
-            saved_event && saved_state && saved_status;
+    if (!(saved_frame && established_frame && loaded_inner && saved_event &&
+          saved_state && saved_status)) {
+        return false;
+    }
+    if (state_fallback != nullptr) {
+        *state_fallback = fallback_offset;
+    }
+    return true;
 }
 
 bool FindDispatchStart(const Image& image, uintptr_t action_call,
                        const ActionCapture& capture,
-                       uint32_t state_register, uintptr_t* output) {
+                       uint32_t state_register, uintptr_t* output,
+                       uint32_t* state_fallback) {
     if (output == nullptr) return false;
     uintptr_t match = 0u;
+    uint32_t matched_fallback = 0u;
     size_t match_count = 0u;
     for (size_t distance = 1u;
          distance <= kFunctionStartSearchInstructions; ++distance) {
         const size_t bytes = distance * sizeof(uint32_t);
         if (action_call < bytes) break;
         uintptr_t candidate = action_call - bytes;
+        uint32_t fallback = 0u;
         if (!ValidateDispatchSetup(image, candidate, action_call, capture,
-                                   state_register)) {
+                                   state_register, &fallback)) {
             continue;
         }
         uint32_t prefix = 0u;
@@ -1188,15 +1325,19 @@ bool FindDispatchStart(const Image& image, uintptr_t action_call,
             candidate -= sizeof(uint32_t);
         }
         match = candidate;
+        matched_fallback = fallback;
         ++match_count;
         if (match_count > 1u) return false;
     }
     if (match_count != 1u) return false;
     *output = match;
+    if (state_fallback != nullptr) {
+        *state_fallback = matched_fallback;
+    }
     return true;
 }
 
-bool DecodeGestureTypeOffset(const Image& image, uintptr_t cancel_set_call,
+bool DecodeGestureTypeOffset(const Image& image, uintptr_t cancel_anchor,
                              uint32_t* output, uint32_t* state_register) {
     if (output == nullptr || state_register == nullptr) return false;
     uint32_t matched_offset = 0u;
@@ -1205,21 +1346,27 @@ bool DecodeGestureTypeOffset(const Image& image, uintptr_t cancel_set_call,
     for (size_t distance = 1u;
          distance <= kFunctionSetupInstructions; ++distance) {
         const size_t bytes = distance * sizeof(uint32_t);
-        if (cancel_set_call < bytes) break;
-        const uintptr_t candidate = cancel_set_call - bytes;
+        if (cancel_anchor < bytes) break;
+        const uintptr_t candidate = cancel_anchor - bytes;
         uint32_t load = 0u;
-        uint32_t compare = 0u;
         uint32_t destination = 0u;
         uint32_t base = 0u;
         uint32_t offset = 0u;
         if (!ReadInstruction(image, candidate, &load) ||
                 !DecodeLdrWImmediate(load, &destination, &base, &offset) ||
-                !ReadInstruction(image, candidate + sizeof(uint32_t),
-                                 &compare) ||
-                !IsCmpWImmediate(compare, destination, 1u) ||
-                offset > 0x1000u) {
+                base < 19u || base > 28u || offset > 0x1000u) {
             continue;
         }
+        bool compared = false;
+        for (size_t look = 1u; look <= 4u && !compared; ++look) {
+            uint32_t compare = 0u;
+            if (ReadInstruction(image, candidate + look * sizeof(uint32_t),
+                                &compare) &&
+                    IsCmpWImmediate(compare, destination, 1u)) {
+                compared = true;
+            }
+        }
+        if (!compared) continue;
         matched_offset = offset;
         matched_register = base;
         ++match_count;
@@ -1263,7 +1410,7 @@ bool LocateGestureStructure(const Image& launcher, GestureStructure* output) {
         uintptr_t cursor = (segment.begin + 3u) & ~uintptr_t{3u};
         while (cursor <= segment.end && segment.end - cursor >= 4u) {
             uint32_t instruction = 0u;
-            uintptr_t cancel_set_call = 0u;
+            CancelEvidence cancel_evidence{};
             uintptr_t primary_decision = 0u;
             uint32_t state_register = 0u;
             ActionCapture action_capture{};
@@ -1273,17 +1420,18 @@ bool LocateGestureStructure(const Image& launcher, GestureStructure* output) {
                     ValidateGestureCandidate(
                             launcher, cursor, action_entries, raw_x_entries,
                             raw_y_entries, clone_entries, set_action_entries,
-                            &cancel_set_call, &action_capture) &&
+                            &cancel_evidence, &action_capture) &&
                     LocatePrimaryActionDecision(
                             launcher, cursor, action_entries,
                             &primary_decision) &&
                     DecodeGestureTypeOffset(
-                            launcher, cancel_set_call,
+                            launcher, cancel_evidence.anchor,
                             &candidate.gesture_type_offset,
                             &state_register) &&
                     FindDispatchStart(
                             launcher, cursor, action_capture,
-                            state_register, &candidate.dispatch)) {
+                            state_register, &candidate.dispatch,
+                            &candidate.state_fallback_offset)) {
                 if (match_count == 0u) {
                     match = candidate;
                     match_count = 1u;
@@ -1337,7 +1485,7 @@ bool ResolveMotionApi(void* handle) {
 int32_t ReadGestureType(void* monitor, void* state) {
     int32_t value = 0;
     if (state == nullptr && monitor != nullptr) {
-        state = static_cast<uint8_t*>(monitor) + 0x20u;
+        state = static_cast<uint8_t*>(monitor) + g_state_fallback_offset;
     }
     if (state != nullptr && g_gesture_type_offset != 0u) {
         memcpy(&value,
@@ -1475,6 +1623,32 @@ void HookDispatch(void* monitor, void* event, void* lock,
     const size_t count = g_motion_get_pointer_count(event);
     const int64_t event_time = g_motion_get_event_time(event);
     const int64_t now_nanos = MonotonicNanos();
+
+#if SMALLWINDOW_DIAGNOSTIC
+    if (action != 2 || g_projection.active) {
+        int32_t lock_type = -1;
+        int32_t monitor_type = -1;
+        if (lock != nullptr && g_gesture_type_offset != 0u) {
+            memcpy(&lock_type,
+                   static_cast<uint8_t*>(lock) + g_gesture_type_offset,
+                   sizeof(lock_type));
+        }
+        if (monitor != nullptr && g_gesture_type_offset != 0u) {
+            memcpy(&monitor_type,
+                   static_cast<uint8_t*>(monitor) + g_state_fallback_offset +
+                           g_gesture_type_offset,
+                   sizeof(monitor_type));
+        }
+        char trace[224]{};
+        snprintf(trace, sizeof(trace),
+                 "dispatch action=%d count=%zu lock=%d type_lock=%d "
+                 "type_fallback=%d inner=%d active=%d",
+                 action, count, lock != nullptr ? 1 : 0, lock_type,
+                 monitor_type, g_projection.inner == monitor ? 1 : 0,
+                 g_projection.active ? 1 : 0);
+        FileLog(trace);
+    }
+#endif
 
     if (action == 0) {
         if (g_projection.active) {
@@ -1667,10 +1841,14 @@ bool InstallLauncherHook(const Image& launcher, void* handle) {
     }
     void* original = nullptr;
     g_gesture_type_offset = structure.gesture_type_offset;
+    g_state_fallback_offset = structure.state_fallback_offset != 0u
+            ? structure.state_fallback_offset
+            : 0x20u;
     g_native_hook(reinterpret_cast<void*>(structure.dispatch),
                   reinterpret_cast<void*>(HookDispatch), &original);
     if (original == nullptr) {
         g_gesture_type_offset = 0u;
+        g_state_fallback_offset = 0x20u;
         __atomic_store_n(&g_launcher_state, uint32_t{3}, __ATOMIC_RELEASE);
         Log(ANDROID_LOG_ERROR, "failed to install launcher dispatch hook");
         return false;

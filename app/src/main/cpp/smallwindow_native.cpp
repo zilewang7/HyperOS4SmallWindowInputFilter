@@ -38,6 +38,11 @@ constexpr size_t kFunctionSetupInstructions = 32u;
 constexpr size_t kCancelSearchInstructions = 64u;
 constexpr size_t kCancelHelperInstructions = 48u;
 constexpr uint32_t kCancelActionImmediate = 0x52800061u;
+constexpr size_t kStatusResetSearchInstructions = 192u;
+constexpr size_t kStateResolveWindowInstructions = 2048u;
+constexpr size_t kStateResolveDepth = 8u;
+constexpr uint32_t kStatusFinishedImmediate = 4u;
+constexpr uint32_t kStatusPointerByteImmediate = 2u;
 constexpr int64_t kTeleportDurationNanos = 180000000;
 constexpr int64_t kMinimumDropHoldNanos = 16000000;
 
@@ -862,6 +867,61 @@ bool DecodeAddXImmediate(uint32_t instruction, uint32_t* destination,
     return *destination != 31u && *base != 31u;
 }
 
+bool DecodeSubXImmediate(uint32_t instruction, uint32_t* destination,
+                         uint32_t* base, uint32_t* immediate) {
+    if (destination == nullptr || base == nullptr || immediate == nullptr ||
+            (instruction & 0xff800000u) != 0xd1000000u) {
+        return false;
+    }
+    *destination = instruction & 0x1fu;
+    *base = (instruction >> 5) & 0x1fu;
+    *immediate = (instruction >> 10) & 0xfffu;
+    return *destination != 31u && *base != 31u;
+}
+
+bool DecodeLdrWPreIndex(uint32_t instruction, uint32_t* base,
+                        uint32_t* offset) {
+    if (base == nullptr || offset == nullptr ||
+            (instruction & 0xffe00c00u) != 0xb8400c00u) {
+        return false;
+    }
+    uint32_t immediate = (instruction >> 12) & 0x1ffu;
+    if ((immediate & 0x100u) != 0u) immediate -= 0x200u;
+    *base = (instruction >> 5) & 0x1fu;
+    *offset = immediate;
+    return *base != 31u;
+}
+
+bool DecodeStrWImmediate(uint32_t instruction, uint32_t source,
+                         uint32_t* base) {
+    if (base == nullptr || (instruction & 0xffc00000u) != 0xb9000000u) {
+        return false;
+    }
+    *base = (instruction >> 5) & 0x1fu;
+    return *base != 31u && (instruction & 0x1fu) == source;
+}
+
+bool DecodeStrBImmediate(uint32_t instruction, uint32_t source,
+                         uint32_t* base) {
+    if (base == nullptr || (instruction & 0xffc00000u) != 0x39000000u) {
+        return false;
+    }
+    *base = (instruction >> 5) & 0x1fu;
+    return *base != 31u && (instruction & 0x1fu) == source;
+}
+
+bool DecodeMovZ(uint32_t instruction, uint32_t* destination,
+                uint32_t* immediate) {
+    if (destination == nullptr || immediate == nullptr ||
+            (instruction & 0xff800000u) != 0x52800000u ||
+            ((instruction >> 21) & 0x3u) != 0u) {
+        return false;
+    }
+    *destination = instruction & 0x1fu;
+    *immediate = (instruction >> 5) & 0xffffu;
+    return *destination != 31u;
+}
+
 bool IsCmpWImmediate(uint32_t instruction, uint32_t source,
                      uint32_t immediate) {
     return source < 32u && immediate < 4096u &&
@@ -1075,11 +1135,9 @@ bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
                               const PltEntries& action_entries,
                               const PltEntries& raw_x_entries,
                               const PltEntries& raw_y_entries,
-                              const PltEntries& clone_entries,
-                              const PltEntries& set_action_entries,
-                              CancelEvidence* cancel_evidence,
-                              ActionCapture* action_capture) {
-    if (cancel_evidence == nullptr || action_capture == nullptr) return false;
+                              ActionCapture* action_capture,
+                              uintptr_t* pointer_check) {
+    if (action_capture == nullptr || pointer_check == nullptr) return false;
     uint32_t instruction = 0u;
     ActionCapture capture{};
     if (!LocateActionCapture(image, action_call, action_entries, &capture)) {
@@ -1123,21 +1181,16 @@ bool ValidateGestureCandidate(const Image& image, uintptr_t action_call,
     if (!action_move_check) return false;
 
     for (size_t i = 1u; i <= kPointerDownSearchInstructions; ++i) {
-        const uintptr_t pointer_check = raw_y_call + i * 4u;
+        const uintptr_t site = raw_y_call + i * 4u;
         uint32_t branch = 0u;
-        if (!ReadInstruction(image, pointer_check, &instruction) ||
+        if (!ReadInstruction(image, site, &instruction) ||
                 !IsCmpWImmediate(instruction, capture.action_register, 5u) ||
-                !ReadInstruction(image, pointer_check + 4u, &branch) ||
+                !ReadInstruction(image, site + 4u, &branch) ||
                 !IsConditionalBranch(branch, 1u)) {
             continue;
         }
-        CancelEvidence evidence{};
-        if (!LocateCancelEvidence(image, pointer_check, clone_entries,
-                                  set_action_entries, &evidence)) {
-            continue;
-        }
-        *cancel_evidence = evidence;
         *action_capture = capture;
+        *pointer_check = site;
         return true;
     }
     return false;
@@ -1196,11 +1249,10 @@ bool LocatePrimaryActionDecision(const Image& image,
 bool ValidateDispatchSetup(const Image& image, uintptr_t start,
                            uintptr_t action_call,
                            const ActionCapture& capture,
-                           uint32_t state_register,
+                           uint32_t* state_register,
                            uint32_t* state_fallback) {
     if (start >= action_call || capture.event_register < 19u ||
-            capture.event_register > 28u || state_register < 19u ||
-            state_register > 28u) {
+            capture.event_register > 28u || state_register == nullptr) {
         return false;
     }
     uint32_t stack_setup = 0u;
@@ -1219,7 +1271,7 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
     bool saved_status = false;
     uint32_t frame_offset = 0u;
     uint32_t monitor_register = 0u;
-    uint32_t fallback_offset = 0u;
+    uint32_t matched_state = 0u;
     const size_t instruction_count =
             static_cast<size_t>((action_call - start) / sizeof(uint32_t));
     for (size_t i = 1u; i < instruction_count; ++i) {
@@ -1251,7 +1303,6 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
         }
         saved_event = saved_event ||
                 IsMovX(instruction, capture.event_register, 1u);
-        saved_state = saved_state || IsMovX(instruction, state_register, 2u);
         for (uint32_t register_index = 19u;
              register_index <= 28u && !saved_status; ++register_index) {
             saved_status = IsMovW(instruction, register_index, 3u);
@@ -1265,11 +1316,38 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
                 }
             }
         }
-        // Some launcher builds accept a null state argument and substitute an
-        // object embedded in the monitor instead; that offset moves between
-        // releases, so it is decoded from the guard rather than hardcoded.
-        if (fallback_offset == 0u && monitor_register != 0u &&
-                IsCbnzX(instruction, state_register)) {
+        // The state object is the second argument; the register it is kept in
+        // is chosen by the register allocator, so it is decoded rather than
+        // assumed.
+        for (uint32_t register_index = 19u; register_index <= 28u;
+             ++register_index) {
+            if (IsMovX(instruction, register_index, 2u)) {
+                if (matched_state != 0u && matched_state != register_index) {
+                    return false;
+                }
+                matched_state = register_index;
+                saved_state = true;
+            }
+        }
+    }
+    if (!(saved_frame && established_frame && loaded_inner && saved_event &&
+          saved_state && saved_status && matched_state != 0u)) {
+        return false;
+    }
+
+    // Some launcher builds accept a null state argument and substitute an
+    // object embedded in the monitor instead; that offset moves between
+    // releases, so it is decoded from the guard rather than hardcoded.
+    uint32_t fallback_offset = 0u;
+    if (monitor_register != 0u) {
+        for (size_t i = 1u; i < instruction_count && fallback_offset == 0u;
+             ++i) {
+            uint32_t instruction = 0u;
+            if (!ReadInstruction(image, start + i * sizeof(uint32_t),
+                                 &instruction) ||
+                    !IsCbnzX(instruction, matched_state)) {
+                continue;
+            }
             for (size_t look = 1u; look <= 2u && fallback_offset == 0u;
                  ++look) {
                 uint32_t next = 0u;
@@ -1281,7 +1359,7 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
                                     &next) &&
                         DecodeAddXImmediate(next, &add_destination, &add_base,
                                             &immediate) &&
-                        add_destination == state_register &&
+                        add_destination == matched_state &&
                         add_base == monitor_register && immediate > 0u &&
                         immediate <= 0x1000u) {
                     fallback_offset = immediate;
@@ -1289,10 +1367,7 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
             }
         }
     }
-    if (!(saved_frame && established_frame && loaded_inner && saved_event &&
-          saved_state && saved_status)) {
-        return false;
-    }
+    *state_register = matched_state;
     if (state_fallback != nullptr) {
         *state_fallback = fallback_offset;
     }
@@ -1300,11 +1375,11 @@ bool ValidateDispatchSetup(const Image& image, uintptr_t start,
 }
 
 bool FindDispatchStart(const Image& image, uintptr_t action_call,
-                       const ActionCapture& capture,
-                       uint32_t state_register, uintptr_t* output,
-                       uint32_t* state_fallback) {
-    if (output == nullptr) return false;
+                       const ActionCapture& capture, uintptr_t* output,
+                       uint32_t* state_register, uint32_t* state_fallback) {
+    if (output == nullptr || state_register == nullptr) return false;
     uintptr_t match = 0u;
+    uint32_t matched_state = 0u;
     uint32_t matched_fallback = 0u;
     size_t match_count = 0u;
     for (size_t distance = 1u;
@@ -1312,9 +1387,10 @@ bool FindDispatchStart(const Image& image, uintptr_t action_call,
         const size_t bytes = distance * sizeof(uint32_t);
         if (action_call < bytes) break;
         uintptr_t candidate = action_call - bytes;
+        uint32_t candidate_state = 0u;
         uint32_t fallback = 0u;
         if (!ValidateDispatchSetup(image, candidate, action_call, capture,
-                                   state_register, &fallback)) {
+                                   &candidate_state, &fallback)) {
             continue;
         }
         uint32_t prefix = 0u;
@@ -1325,12 +1401,14 @@ bool FindDispatchStart(const Image& image, uintptr_t action_call,
             candidate -= sizeof(uint32_t);
         }
         match = candidate;
+        matched_state = candidate_state;
         matched_fallback = fallback;
         ++match_count;
         if (match_count > 1u) return false;
     }
     if (match_count != 1u) return false;
     *output = match;
+    *state_register = matched_state;
     if (state_fallback != nullptr) {
         *state_fallback = matched_fallback;
     }
@@ -1378,6 +1456,196 @@ bool DecodeGestureTypeOffset(const Image& image, uintptr_t cancel_anchor,
     return true;
 }
 
+// Several launcher builds keep the status word inside the state object but
+// address it through a register that already points at the field. Walk back
+// from the use site to the definition of that register so the offset is still
+// measured from the state object itself.
+bool ResolveStateFieldOffset(const Image& image, uintptr_t function_start,
+                             uintptr_t use, uint32_t register_index,
+                             uint32_t state_register, size_t depth,
+                             uint32_t* output) {
+    if (output == nullptr || depth > kStateResolveDepth) return false;
+    if (register_index == state_register) {
+        *output = 0u;
+        return true;
+    }
+    for (size_t distance = 1u;
+         distance <= kStateResolveWindowInstructions; ++distance) {
+        const size_t bytes = distance * sizeof(uint32_t);
+        if (use < function_start + bytes) return false;
+        const uintptr_t candidate = use - bytes;
+        uint32_t instruction = 0u;
+        if (!ReadInstruction(image, candidate, &instruction)) return false;
+
+        uint32_t destination = 0u;
+        uint32_t base = 0u;
+        uint32_t immediate = 0u;
+        if (DecodeAddXImmediate(instruction, &destination, &base, &immediate) &&
+                destination == register_index) {
+            uint32_t base_offset = 0u;
+            if (!ResolveStateFieldOffset(image, function_start, candidate,
+                                         base, state_register, depth + 1u,
+                                         &base_offset) ||
+                    base_offset > UINT32_MAX - immediate) {
+                return false;
+            }
+            *output = base_offset + immediate;
+            return true;
+        }
+        if (DecodeSubXImmediate(instruction, &destination, &base, &immediate) &&
+                destination == register_index) {
+            uint32_t base_offset = 0u;
+            if (!ResolveStateFieldOffset(image, function_start, candidate,
+                                         base, state_register, depth + 1u,
+                                         &base_offset) ||
+                    base_offset < immediate) {
+                return false;
+            }
+            *output = base_offset - immediate;
+            return true;
+        }
+        if (IsMovX(instruction, register_index, 31u)) return false;
+        for (uint32_t source = 0u; source < 31u; ++source) {
+            if (IsMovX(instruction, register_index, source)) {
+                return ResolveStateFieldOffset(image, function_start, candidate,
+                                               source, state_register,
+                                               depth + 1u, output);
+            }
+        }
+        uint32_t writeback_base = 0u;
+        uint32_t writeback_offset = 0u;
+        if (DecodeLdrWPreIndex(instruction, &writeback_base,
+                               &writeback_offset) &&
+                writeback_base == register_index) {
+            uint32_t base_offset = 0u;
+            if (!ResolveStateFieldOffset(image, function_start, candidate,
+                                         writeback_base, state_register,
+                                         depth + 1u, &base_offset) ||
+                    base_offset > UINT32_MAX - writeback_offset) {
+                return false;
+            }
+            *output = base_offset + writeback_offset;
+            return true;
+        }
+        // Any other load or immediate move into the register breaks the chain.
+        uint32_t loaded = 0u;
+        if (DecodeLdrWImmediate(instruction, &loaded, &base, &immediate) &&
+                loaded == register_index) {
+            return false;
+        }
+        if (DecodeLdrXImmediate(instruction, &loaded, &base, &immediate) &&
+                loaded == register_index) {
+            return false;
+        }
+        uint32_t moved = 0u;
+        uint32_t value = 0u;
+        if (DecodeMovZ(instruction, &moved, &value) &&
+                moved == register_index) {
+            return false;
+        }
+        if (DecodeMovWFromW0(instruction, &moved) &&
+                moved == register_index) {
+            return false;
+        }
+    }
+    return false;
+}
+
+// Newer builds finish the Home gesture by writing a fixed status pair: the
+// status word set to 4 next to a per-pointer byte set to 2. That pair is the
+// same evidence on every release, so the status field offset is derived from
+// it instead of from the cancel call older builds inline.
+bool LocateStatusResetField(const Image& image, uintptr_t function_start,
+                            uintptr_t pointer_check, uint32_t state_register,
+                            uint32_t* output) {
+    if (output == nullptr || function_start >= pointer_check) return false;
+    const uintptr_t limit = pointer_check +
+            kStatusResetSearchInstructions * sizeof(uint32_t);
+    uint32_t matched_offset = 0u;
+    size_t match_count = 0u;
+    for (uintptr_t cursor = function_start;
+         cursor + 3u * sizeof(uint32_t) < limit; cursor += sizeof(uint32_t)) {
+        uint32_t finish = 0u;
+        uint32_t byte_flag = 0u;
+        uint32_t store = 0u;
+        uint32_t store_byte = 0u;
+        if (!ReadInstruction(image, cursor, &finish) ||
+                !ReadInstruction(image, cursor + sizeof(uint32_t),
+                                 &byte_flag) ||
+                !ReadInstruction(image, cursor + 2u * sizeof(uint32_t),
+                                 &store) ||
+                !ReadInstruction(image, cursor + 3u * sizeof(uint32_t),
+                                 &store_byte)) {
+            return false;
+        }
+        uint32_t finish_register = 0u;
+        uint32_t finish_value = 0u;
+        uint32_t byte_register = 0u;
+        uint32_t byte_value = 0u;
+        if (!DecodeMovZ(finish, &finish_register, &finish_value) ||
+                !DecodeMovZ(byte_flag, &byte_register, &byte_value) ||
+                finish_value != kStatusFinishedImmediate ||
+                byte_value != kStatusPointerByteImmediate) {
+            continue;
+        }
+        uint32_t store_base = 0u;
+        uint32_t byte_base = 0u;
+        if (!DecodeStrWImmediate(store, finish_register, &store_base) ||
+                !DecodeStrBImmediate(store_byte, byte_register, &byte_base)) {
+            continue;
+        }
+        uint32_t offset = 0u;
+        if (!ResolveStateFieldOffset(image, function_start,
+                                     cursor + 2u * sizeof(uint32_t),
+                                     store_base, state_register, 0u,
+                                     &offset) ||
+                offset == 0u) {
+            continue;
+        }
+        if (match_count != 0u && offset != matched_offset) return false;
+        matched_offset = offset;
+        ++match_count;
+    }
+    if (match_count == 0u) return false;
+
+    // The same word has to be read and compared against the armed value, so a
+    // reset pair that happens to reuse the register for something else cannot
+    // stand on its own.
+    size_t compare_count = 0u;
+    for (uintptr_t cursor = function_start; cursor < limit;
+         cursor += sizeof(uint32_t)) {
+        uint32_t instruction = 0u;
+        uint32_t destination = 0u;
+        uint32_t base = 0u;
+        uint32_t offset = 0u;
+        if (!ReadInstruction(image, cursor, &instruction) ||
+                !DecodeLdrWImmediate(instruction, &destination, &base,
+                                     &offset)) {
+            continue;
+        }
+        bool compared = false;
+        for (size_t look = 1u; look <= 4u && !compared; ++look) {
+            uint32_t compare = 0u;
+            if (ReadInstruction(image, cursor + look * sizeof(uint32_t),
+                                &compare) &&
+                    IsCmpWImmediate(compare, destination, 1u)) {
+                compared = true;
+            }
+        }
+        if (!compared) continue;
+        uint32_t resolved = 0u;
+        if (!ResolveStateFieldOffset(image, function_start, cursor, base,
+                                     state_register, 0u, &resolved)) {
+            continue;
+        }
+        if (resolved != matched_offset) continue;
+        ++compare_count;
+    }
+    if (compare_count == 0u) return false;
+    *output = matched_offset;
+    return true;
+}
+
 bool LocateGestureStructure(const Image& launcher, GestureStructure* output) {
     if (output == nullptr || !IsLauncherLibraryPath(launcher.path)) {
         return false;
@@ -1410,28 +1678,59 @@ bool LocateGestureStructure(const Image& launcher, GestureStructure* output) {
         uintptr_t cursor = (segment.begin + 3u) & ~uintptr_t{3u};
         while (cursor <= segment.end && segment.end - cursor >= 4u) {
             uint32_t instruction = 0u;
-            CancelEvidence cancel_evidence{};
             uintptr_t primary_decision = 0u;
+            uintptr_t pointer_check = 0u;
             uint32_t state_register = 0u;
             ActionCapture action_capture{};
             GestureStructure candidate{};
-            if (ReadInstruction(launcher, cursor, &instruction) &&
-                    IsCallTo(instruction, cursor, action_entries) &&
-                    ValidateGestureCandidate(
+            if (!ReadInstruction(launcher, cursor, &instruction) ||
+                    !IsCallTo(instruction, cursor, action_entries) ||
+                    !ValidateGestureCandidate(
                             launcher, cursor, action_entries, raw_x_entries,
-                            raw_y_entries, clone_entries, set_action_entries,
-                            &cancel_evidence, &action_capture) &&
-                    LocatePrimaryActionDecision(
+                            raw_y_entries, &action_capture, &pointer_check) ||
+                    !LocatePrimaryActionDecision(
                             launcher, cursor, action_entries,
-                            &primary_decision) &&
-                    DecodeGestureTypeOffset(
-                            launcher, cancel_evidence.anchor,
-                            &candidate.gesture_type_offset,
-                            &state_register) &&
-                    FindDispatchStart(
+                            &primary_decision) ||
+                    !FindDispatchStart(
                             launcher, cursor, action_capture,
-                            state_register, &candidate.dispatch,
+                            &candidate.dispatch, &state_register,
                             &candidate.state_fallback_offset)) {
+                cursor += 4u;
+                continue;
+            }
+            // Newer builds mark the finished gesture with a fixed status pair;
+            // older builds cancel the drag through MotionEvent clone plus
+            // setAction. Either piece of evidence pins the status field, and
+            // when both are present they have to agree.
+            uint32_t reset_offset = 0u;
+            const bool reset_found = LocateStatusResetField(
+                    launcher, candidate.dispatch, pointer_check,
+                    state_register, &reset_offset);
+            uint32_t cancel_offset = 0u;
+            CancelEvidence cancel_evidence{};
+            uint32_t cancel_register = 0u;
+            const bool cancel_found =
+                    LocateCancelEvidence(launcher, pointer_check,
+                                         clone_entries, set_action_entries,
+                                         &cancel_evidence) &&
+                    DecodeGestureTypeOffset(launcher, cancel_evidence.anchor,
+                                            &cancel_offset,
+                                            &cancel_register) &&
+                    cancel_register == state_register;
+            if (reset_found && cancel_found) {
+                if (reset_offset != cancel_offset) {
+                    return false;
+                }
+                candidate.gesture_type_offset = reset_offset;
+            } else if (reset_found) {
+                candidate.gesture_type_offset = reset_offset;
+            } else if (cancel_found) {
+                candidate.gesture_type_offset = cancel_offset;
+            } else {
+                cursor += 4u;
+                continue;
+            }
+            if (candidate.gesture_type_offset != 0u) {
                 if (match_count == 0u) {
                     match = candidate;
                     match_count = 1u;
